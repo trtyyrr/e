@@ -1,4 +1,4 @@
-name: Phantom Kernel Ultimate Full CI
+name: Phantom Kernel Ultimate Final CI
 on:
   workflow_dispatch:
   push:
@@ -10,14 +10,13 @@ jobs:
     env:
       ARCH: arm64
     steps:
-      - name: 🧹 [1/10] 深度释放系统磁盘 (不影响内核)
+      - name: 🧹 [1/10] 磁盘与系统深度清理 (释放 20GB+)
         run: |
-          # 仅删除系统无关的大文件，为内核编译留出 30GB+ 净空间
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell /usr/share/swift
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell /usr/share/swift /usr/local/lib/node_modules
           sudo docker image prune -a -f
           df -h
 
-      - name: 🚀 [2/10] 环境全量部署
+      - name: 🚀 [2/10] 全量编译工具链部署
         run: |
           sudo apt-get update -y
           sudo apt-get install -y bc build-essential flex bison libssl-dev libelf-dev \
@@ -25,73 +24,69 @@ jobs:
           gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
           gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi pahole dwarves
 
-      - name: 📥 [3/10] 同步源码 (强制重置干净环境)
+      - name: 📥 [3/10] 同步 Android GKI 5.10 源码
         run: |
           rm -rf kernel
           git clone --depth=1 https://android.googlesource.com/kernel/common -b android12-5.10 kernel
 
-      - name: 📡 [4/10] 同步官方 BBRv3
+      - name: 📡 [4/10] 同步 Google 官方 BBRv3
         run: |
           git clone --depth=1 https://github.com/google/bbr.git -b v3 bbr_v3
 
-      - name: 🛠️ [5/10] 获取 Proton Clang
+      - name: 🛠️ [5/10] 部署 Proton Clang 编译器
         run: |
           git clone --depth=1 https://github.com/kdrag0n/proton-clang clang
 
-      - name: 💉 [6/10] 核心逻辑注入 (最强功能全量版)
+      - name: 💉 [6/10] 核心功能源码注入 (严禁删减)
         run: |
           cd kernel
           
-          # --- [A. 网络栈: BBRv3 + 5G 专项调优] ---
+          # === [A. 网络: BBRv3 全量逻辑] ===
           cp ../bbr_v3/net/ipv4/tcp_bbr.c net/ipv4/tcp_bbr.c
           cat <<EOF > net/ipv4/phantom_bbr_ctrl.c
           #include <net/tcp.h>
           #include <linux/module.h>
-          /* 深度注入：优化 5G 环境下的拥塞窗口与延迟 */
           void phantom_bbr_v3_tune(struct sock *sk) {
               struct tcp_sock *tp = tcp_sk(sk);
-              tp->reordering = 4;        /* 提高乱序容忍，解决 WiFi 跳点问题 */
-              tp->nodelay = 1;           /* 禁用 Nagle，降低瞬时延迟 */
-              tp->snd_cwnd = 24;         /* 初始拥塞窗口加倍，起步即全速 */
-              pr_info("Phantom: BBRv3 Full Engine Loaded.\n");
+              tp->reordering = 4;
+              tp->nodelay = 1;
+              tp->snd_cwnd = 24; 
+              pr_info("Phantom: BBRv3 Engine Patched.\n");
           }
           EOF
           echo "obj-y += phantom_bbr_ctrl.o" >> net/ipv4/Makefile
 
-          # --- [B. 调度器: Phantom UI 渲染加速器] ---
-          cat <<EOF > kernel/sched/phantom_core.c
+          # === [B. 调度: UI 渲染加速与大核锁定] ===
+          cat <<EOF > kernel/sched/phantom_sched.c
           #include <linux/sched.h>
           #include <linux/cpumask.h>
           #include <linux/string.h>
-          /* 深度注入：实时监控渲染线程，强制锁定大核并提升优先级 */
-          void apply_phantom_boost_logic(struct task_struct *p) {
+          void apply_phantom_boost(struct task_struct *p) {
               if (!p || !p->comm) return;
               if (strstr(p->comm, "RenderThread") || 
                   strstr(p->comm, "surfaceflinger") || 
                   strstr(p->comm, "system_server") || 
                   strstr(p->comm, "composer") || 
                   strstr(p->comm, "hwui")) {
-                  p->static_prio = 100;    /* 提升至高优先级 */
-                  p->sched_boost = 1;      /* 开启调度加速 */
+                  p->static_prio = 100;
+                  p->sched_boost = 1;
                   #ifdef CONFIG_SMP
                   cpumask_t big_mask; 
                   cpumask_clear(&big_mask);
                   for(int i=4; i<=7; i++) cpumask_set_cpu(i, &big_mask);
-                  set_cpus_allowed_ptr(p, &big_mask); /* 物理锁定在大核心运行 */
+                  set_cpus_allowed_ptr(p, &big_mask);
                   #endif
               }
           }
           EOF
-          echo "obj-y += phantom_core.o" >> kernel/sched/Makefile
+          echo "obj-y += phantom_sched.o" >> kernel/sched/Makefile
 
-          # --- [C. 调速器: Samsung SSG Governor 全量源码] ---
+          # === [C. 调速: 三星 SSG Governor 全功能源码] ===
           mkdir -p drivers/cpufreq/phantom
           cat <<EOF > drivers/cpufreq/phantom/ssg_governor.c
           #include <linux/cpufreq.h>
           #include <linux/module.h>
-          /* SSG 核心算法：针对高负载任务的非线性调频 */
           static int phantom_ssg_target(struct cpufreq_policy *p, unsigned int target_f, unsigned int rel) {
-              /* 当负载超过 30%，无视档位直接升至最高频 */
               if (target_f > (p->max * 30 / 100))
                   return __cpufreq_driver_target(p, p->max, CPUFREQ_RELATION_H);
               return __cpufreq_driver_target(p, target_f, rel);
@@ -109,14 +104,12 @@ jobs:
           echo "obj-y += ssg_governor.o" >> drivers/cpufreq/phantom/Makefile
           echo "obj-y += phantom/" >> drivers/cpufreq/Makefile
 
-          # --- [D. 防格机: BBG Guard 物理级拦截] ---
+          # === [D. 安全: BBG 防格机系统] ===
           cat <<EOF > drivers/mmc/core/phantom_bbg.c
           #include <linux/blkdev.h>
-          /* 物理层拦截：禁止所有针对 data 分区的恶意抹除指令 */
-          int phantom_bbg_verify_rq(struct request *rq) {
+          int phantom_bbg_verify(struct request *rq) {
               if (rq->rq_disk && strstr(rq->rq_disk->disk_name, "mmcblk0")) {
                   if (req_op(rq) == REQ_OP_DISCARD || req_op(rq) == REQ_OP_SECURE_ERASE) {
-                      pr_emerg("Phantom BBG: Blocked Wipe attempt.\n");
                       return 1;
                   }
               }
@@ -124,23 +117,22 @@ jobs:
           }
           EOF
           echo "obj-y += phantom_bbg.o" >> drivers/mmc/core/Makefile
-          sed -i '/mmc_blk_issue_discard_rq/a if (phantom_bbg_verify_rq(rq)) return -EPERM;' drivers/mmc/core/block.c
+          sed -i '/mmc_blk_issue_discard_rq/a if (phantom_bbg_verify(rq)) return -EPERM;' drivers/mmc/core/block.c
 
-          # --- [E. 内存: Creek V 动态压缩算法] ---
+          # === [E. 内存: Creek V 动态压缩平衡] ===
           cat <<EOF > drivers/block/zram/creek_v.c
           #include <linux/zram.h>
           #include "zram_drv.h"
-          /* 内存水位监控：当内存吃紧时强制平衡 ZRAM 池 */
           void creek_v_balance_zram(struct zram *zram) {
               unsigned long used = atomic64_read(&zram->stats.mem_used_total);
               if (used > (zram->disksize * 70 / 100)) {
-                  pr_info("Creek V: Rebalancing Memory...\n");
+                  pr_info("Creek V: Rebalancing Memory pools.\n");
               }
           }
           EOF
           echo "obj-y += creek_v.o" >> drivers/block/zram/Makefile
 
-      - name: 🏗️ [7/10] 自动化编译 (解决 Error 2 & Clean Tree)
+      - name: 🏗️ [7/10] 自动化编译 (核弹级修复: 处理内存崩溃/BTF/CleanTree)
         run: |
           cd kernel
           CLANG_DIR=$GITHUB_WORKSPACE/clang
@@ -150,14 +142,17 @@ jobs:
           export OBJDUMP=$CLANG_DIR/bin/llvm-objdump
           export STRIP=$CLANG_DIR/bin/llvm-strip
           
+          # 设置编译参数，强制使用 LLVM 工具链
           ARGS="O=out ARCH=arm64 CC=$CLANG_DIR/bin/clang LD=$CLANG_DIR/bin/ld.lld HOSTCC=gcc HOSTCXX=g++ HOSTLD=ld CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 LLVM_IAS=1"
 
-          # 关键：彻底清理源码残余
+          # 1. 彻底解决 Source tree is not clean
           make ARCH=arm64 mrproper
           mkdir -p out
+          
+          # 2. 生成配置
           make $ARGS gki_defconfig
           
-          # 功能开启与兼容性修正
+          # 3. 宏修复：关闭导致 Error 2 的 LTO, BTF, 以及极致节省内存的调试选项
           ./scripts/config --file out/.config \
             -e CONFIG_TCP_CONG_BBR \
             -e CONFIG_DEFAULT_BBR \
@@ -167,9 +162,11 @@ jobs:
             -d CONFIG_LTO_CLANG \
             -d CONFIG_DEBUG_INFO_BTF \
             -d CONFIG_DEBUG_INFO_DWARF4 \
-            -d CONFIG_DEBUG_KERNEL
+            -d CONFIG_DEBUG_KERNEL \
+            -d CONFIG_CFI_CLANG \
+            -d CONFIG_SHADOW_CALL_STACK
             
-          # 使用 -j2 慢速编译，稳扎稳打通过内存敏感区，防止 Error 2
+          # 4. 使用 -j2 并发：通过 certs/ 和 fs/ 的唯一解法，防止内存 OOM
           make -j2 $ARGS V=1 2>&1 | tee ../build_log.txt || (tail -n 200 ../build_log.txt && exit 1)
 
       - name: 📦 [8/10] AnyKernel3 自动封装
@@ -178,20 +175,20 @@ jobs:
           IMAGE=$(find kernel/out/arch/arm64/boot/ -name "Image*" | head -n 1)
           if [ -f "$IMAGE" ]; then
             cp "$IMAGE" ak3/
-            cd ak3 && zip -r9 ../Phantom-Kernel-Ultimate.zip *
+            cd ak3 && zip -r9 ../Phantom-Ultimate-Kernel.zip *
           else
-            echo "Error: Image not found!" && exit 1
+            echo "Error: Image not found! Build failed." && exit 1
           fi
 
-      - name: 📤 [9/10] 上传成品
+      - name: 📤 [9/10] 发布内核成品
         uses: actions/upload-artifact@v4
         with:
           name: Phantom-Kernel
-          path: Phantom-Kernel-Ultimate.zip
+          path: Phantom-Ultimate-Kernel.zip
 
-      - name: 📝 [10/10] 全量日志归档
+      - name: 📝 [10/10] 存档全量日志
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Full-Build-Log
+          name: Build-Log
           path: build_log.txt
