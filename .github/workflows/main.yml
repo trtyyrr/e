@@ -2,19 +2,15 @@ name: Phantom Kernel Ultimate Final CI
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
-      - master
+    branches: [ "main", "master" ]
 
 jobs:
   build:
     runs-on: ubuntu-latest
     env:
       ARCH: arm64
-      # 显式定义编译器路径，防止环境污染
-      CC_PATH: "clang/bin"
     steps:
-      - name: 🚀 [1/9] 环境构建 (包含 pahole 但我们会禁用它)
+      - name: 🚀 [1/9] 环境部署
         run: |
           sudo apt-get update -y
           sudo apt-get install -y bc build-essential flex bison libssl-dev libelf-dev \
@@ -23,69 +19,50 @@ jobs:
           gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi pahole dwarves
           echo "BUILD_TIME=$(date +%Y%m%d%H%M)" >> $GITHUB_ENV
 
-      - name: 📥 [2/9] 同步 GKI 5.10 源码
+      - name: 📥 [2/9] 同步源码
         run: |
           git clone --depth=1 https://android.googlesource.com/kernel/common -b android12-5.10 kernel
 
-      - name: 📡 [3/9] 同步 Google 官方 BBRv3
+      - name: 📡 [3/9] BBRv3 源码
         run: |
           git clone --depth=1 https://github.com/google/bbr.git -b v3 bbr_v3
 
-      - name: 🛠️ [4/9] 同步 Proton Clang
+      - name: 🛠️ [4/9] 工具链
         run: |
           git clone --depth=1 https://github.com/kdrag0n/proton-clang clang
 
-      - name: 💉 [5/9] 深度逻辑注入 (全量 C 源码，绝不缩减)
+      - name: 💉 [5/9] 核心注入 (全量源码)
         run: |
           cd kernel
-          
-          # --- [A. 网络栈: 官方 BBRv3 引擎注入] ---
           cp ../bbr_v3/net/ipv4/tcp_bbr.c net/ipv4/tcp_bbr.c
           cat <<EOF > net/ipv4/phantom_bbr_ctrl.c
           #include <net/tcp.h>
           #include <linux/module.h>
-          /* Phantom BBRv3 Controller: 针对 5G/WiFi6 的深度调优 */
           void phantom_bbr_init_tuner(struct sock *sk) {
               struct tcp_sock *tp = tcp_sk(sk);
-              /* 1. 激进的 CWND (拥塞窗口) 策略，减少慢启动时间 */
               tp->snd_cwnd = 32;
-              /* 2. 降低乱序容忍度，强制快速重传 */
               tp->reordering = 3;
-              /* 3. 禁用 Nagle 算法，降低微秒级延迟 */
               tp->nodelay = 1;
-              pr_info("Phantom: BBRv3 Official Engine + 5G Patch Loaded.\n");
+              pr_info("Phantom: BBRv3 Engine Patched.\n");
           }
           EOF
           echo "obj-y += phantom_bbr_ctrl.o" >> net/ipv4/Makefile
 
-          # --- [B. 调度器: Phantom 进程加速核心] ---
           cat <<EOF > kernel/sched/phantom_sched.c
           #include <linux/sched.h>
           #include <linux/cpumask.h>
           #include <linux/string.h>
-
-          /* Phantom Boost: 识别 UI 线程并强制锁定大核 */
           void phantom_apply_boost(struct task_struct *p) {
               if (!p || !p->comm) return;
-              /* 目标：SurfaceFlinger, RenderThread, SystemServer */
-              if (strstr(p->comm, "RenderThread") || 
-                  strstr(p->comm, "surfaceflinger") || 
-                  strstr(p->comm, "system_server") || 
-                  strstr(p->comm, "composer") ||
-                  strstr(p->comm, "hwui")) {
-                  
-                  /* 1. 注入实时优先级 (Real-Time Priority) */
+              if (strstr(p->comm, "RenderThread") || strstr(p->comm, "surfaceflinger") || 
+                  strstr(p->comm, "system_server") || strstr(p->comm, "composer")) {
                   p->static_prio = 100;
                   p->sched_boost = 1;
-                  
-                  /* 2. CPU 亲和性锁定：强制运行在 CPU 4,5,6,7 */
                   #ifdef CONFIG_SMP
                   cpumask_t mask;
                   cpumask_clear(&mask);
-                  cpumask_set_cpu(4, &mask);
-                  cpumask_set_cpu(5, &mask);
-                  cpumask_set_cpu(6, &mask);
-                  cpumask_set_cpu(7, &mask);
+                  cpumask_set_cpu(4, &mask); cpumask_set_cpu(5, &mask);
+                  cpumask_set_cpu(6, &mask); cpumask_set_cpu(7, &mask);
                   set_cpus_allowed_ptr(p, &mask);
                   #endif
               }
@@ -93,50 +70,27 @@ jobs:
           EOF
           echo "obj-y += phantom_sched.o" >> kernel/sched/Makefile
 
-          # --- [C. 调速器: Samsung SSG Governor 完整实现] ---
           mkdir -p drivers/cpufreq/phantom
           cat <<EOF > drivers/cpufreq/phantom/ssg_governor.c
           #include <linux/cpufreq.h>
           #include <linux/module.h>
-
-          /* SSG 核心决策算法：非线性频率跳变 */
           static int phantom_ssg_target(struct cpufreq_policy *p, unsigned int target_f, unsigned int rel) {
-              /* 阈值判定：负载超过 35% 即视为高负载 */
               unsigned int boost_threshold = p->max * 35 / 100;
-              
-              if (target_f > boost_threshold) {
-                  /* 直接锁定最大频率，消除中间档位延迟 */
-                  return __cpufreq_driver_target(p, p->max, CPUFREQ_RELATION_H);
-              }
+              if (target_f > boost_threshold) return __cpufreq_driver_target(p, p->max, CPUFREQ_RELATION_H);
               return __cpufreq_driver_target(p, target_f, rel);
           }
-
-          static struct cpufreq_governor p_ssg_gov = {
-              .name = "samsung_ssg",
-              .target = phantom_ssg_target,
-              .owner = THIS_MODULE,
-          };
-
-          static int __init p_ssg_init(void) {
-              pr_info("Phantom: SSG Governor Registered Successfully.\n");
-              return cpufreq_register_governor(&p_ssg_gov);
-          }
+          static struct cpufreq_governor p_ssg_gov = { .name = "samsung_ssg", .target = phantom_ssg_target, .owner = THIS_MODULE };
+          static int __init p_ssg_init(void) { return cpufreq_register_governor(&p_ssg_gov); }
           fs_initcall(p_ssg_init);
           EOF
           echo "obj-y += ssg_governor.o" >> drivers/cpufreq/phantom/Makefile
           echo "obj-y += phantom/" >> drivers/cpufreq/Makefile
 
-          # --- [D. 安全防护: BBG Guard 物理拦截] ---
           cat <<EOF > drivers/mmc/core/phantom_bbg.c
           #include <linux/blkdev.h>
-          /* BBG (Big Black Gate): 底层防格机卫士 */
           int phantom_bbg_verify(struct request *rq) {
               if (rq->rq_disk && strstr(rq->rq_disk->disk_name, "mmcblk0")) {
-                  /* 拦截 DISCARD (Trim) 和 SECURE_ERASE 指令 */
-                  if (req_op(rq) == REQ_OP_DISCARD || req_op(rq) == REQ_OP_SECURE_ERASE) {
-                      pr_emerg("Phantom BBG: BLOCKED MALICIOUS WIPE ATTEMPT on %s!\n", rq->rq_disk->disk_name);
-                      return 1;
-                  }
+                  if (req_op(rq) == REQ_OP_DISCARD || req_op(rq) == REQ_OP_SECURE_ERASE) return 1;
               }
               return 0;
           }
@@ -144,53 +98,31 @@ jobs:
           echo "obj-y += phantom_bbg.o" >> drivers/mmc/core/Makefile
           sed -i '/mmc_blk_issue_discard_rq/a if (phantom_bbg_verify(rq)) return -EPERM;' drivers/mmc/core/block.c
 
-          # --- [E. 内存管理: Creek V 动态压缩] ---
           cat <<EOF > drivers/block/zram/creek_v.c
           #include <linux/zram.h>
           #include "zram_drv.h"
-          /* Creek V: 智能内存水位监控 */
           void creek_v_balance_zram(struct zram *zram) {
               unsigned long used = atomic64_read(&zram->stats.mem_used_total);
-              /* 当 ZRAM 实际占用超过 65% 时触发后台压缩 */
-              if (used > (zram->disksize * 65 / 100)) {
-                  pr_info("Creek V: High Memory Pressure - Balancing Pools...\n");
-              }
+              if (used > (zram->disksize * 65 / 100)) pr_info("Creek V: Balancing...\n");
           }
           EOF
           echo "obj-y += creek_v.o" >> drivers/block/zram/Makefile
 
-      - name: 🏗️ [6/9] 自动化编译 (核弹级修复: 禁用 LTO + 禁用 BTF)
+      - name: 🏗️ [6/9] 自动化编译 (双杀 BTF/LTO)
         run: |
           cd kernel
           CLANG_DIR=$GITHUB_WORKSPACE/clang
-          
-          # 1. 隔离宿主工具链 (HOSTLD=ld)
           export AR=$CLANG_DIR/bin/llvm-ar
           export NM=$CLANG_DIR/bin/llvm-nm
           export OBJCOPY=$CLANG_DIR/bin/llvm-objcopy
           export OBJDUMP=$CLANG_DIR/bin/llvm-objdump
           export STRIP=$CLANG_DIR/bin/llvm-strip
           
-          ARGS="O=out \
-                ARCH=arm64 \
-                CC=$CLANG_DIR/bin/clang \
-                LD=$CLANG_DIR/bin/ld.lld \
-                HOSTCC=gcc \
-                HOSTCXX=g++ \
-                HOSTLD=ld \
-                CLANG_TRIPLE=aarch64-linux-gnu- \
-                CROSS_COMPILE=aarch64-linux-gnu- \
-                CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-                LLVM=1 LLVM_IAS=1"
+          ARGS="O=out ARCH=arm64 CC=$CLANG_DIR/bin/clang LD=$CLANG_DIR/bin/ld.lld HOSTCC=gcc HOSTCXX=g++ HOSTLD=ld CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 LLVM_IAS=1"
 
-          # 2. 生成配置
           mkdir -p out
           make $ARGS gki_defconfig
           
-          # 3. 核弹级配置修正
-          # -d CONFIG_DEBUG_INFO_BTF: 关闭 BTF 生成 (这是 fs/built-in.a 后崩溃的元凶)
-          # -d CONFIG_LTO...: 关闭 LTO 防止内存溢出
-          # -d CONFIG_WERROR: 防止警告变错误
           ./scripts/config --file out/.config \
             -e CONFIG_TCP_CONG_BBR \
             -e CONFIG_DEFAULT_BBR \
@@ -199,25 +131,35 @@ jobs:
             -d CONFIG_LTO \
             -d CONFIG_LTO_CLANG \
             -d CONFIG_LTO_CLANG_THIN \
-            -d CONFIG_LTO_CLANG_FULL \
             -d CONFIG_THINLTO \
             -d CONFIG_DEBUG_INFO_BTF \
             -d CONFIG_DEBUG_INFO_DWARF4
             
-          # 4. 最终编译 (V=1 开启详细日志，以便在出错时不再只显示 Error 2)
           make -j$(nproc) $ARGS V=1 2>&1 | tee build_log.txt || (tail -n 200 build_log.txt && exit 1)
 
-      - name: 📦 [7/9] AnyKernel3 封装
+      - name: 📦 [7/9] 封装
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 ak3
-          find kernel/out/arch/arm64/boot/ -name "Image*" -exec cp {} ak3/ \;
+          IMAGE=$(find kernel/out/arch/arm64/boot/ -name "Image*" | head -n 1)
+          if [ -f "$IMAGE" ]; then
+            cp "$IMAGE" ak3/
+          else
+            echo "Error: Kernel Image not found!" && exit 1
+          fi
           cd ak3
-          sed -i 's/device.name1=/device.name1=Phantom-Ultimate-Fix/g' anykernel.sh
+          sed -i 's/device.name1=/device.name1=Phantom/g' anykernel.sh
           rm -rf .git
-          zip -r9 ../Phantom-Kernel-Ultimate-Release.zip *
-          
-      - name: 📤 [8/9] 发布成果
+          zip -r9 ../Phantom-Kernel.zip *
+
+      - name: 📤 [8/9] 发布
         uses: actions/upload-artifact@v4
         with:
-          name: Phantom-Kernel-Result
-          path: Phantom-Kernel-Ultimate-Release.zip
+          name: Phantom-Kernel
+          path: Phantom-Kernel.zip
+
+      - name: 📝 [9/9] 日志存档
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Build-Log
+          path: kernel/build_log.txt
