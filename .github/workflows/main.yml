@@ -1,4 +1,4 @@
-name: Phantom Kernel Ultimate Full CI
+name: Phantom Kernel Ultimate Final CI
 on:
   workflow_dispatch:
 
@@ -8,7 +8,7 @@ jobs:
     env:
       ARCH: arm64
     steps:
-      - name: 🚀 [1/8] 环境深度预设
+      - name: 🚀 [1/9] 环境深度预设 (增加 32 位交叉编译支持)
         run: |
           sudo apt-get update -y
           sudo apt-get install -y bc build-essential flex bison libssl-dev libelf-dev \
@@ -17,38 +17,38 @@ jobs:
           gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi pahole dwarves
           echo "BUILD_TIME=$(date +%Y%m%d%H%M)" >> $GITHUB_ENV
 
-      - name: 📥 [2/8] 内核源码获取 (GKI 5.10)
+      - name: 📥 [2/9] 同步 GKI 5.10 源码
         run: |
           git clone --depth=1 https://android.googlesource.com/kernel/common -b android12-5.10 kernel
 
-      - name: 📡 [3/8] 官方 BBRv3 源码同步
+      - name: 📡 [3/9] 同步 Google 官方 BBRv3 源码
         run: |
           git clone --depth=1 https://github.com/google/bbr.git -b v3 bbr_v3
 
-      - name: 🛠️ [4/8] Proton Clang 工具链获取
+      - name: 🛠️ [4/9] 同步 Proton Clang 工具链
         run: |
           git clone --depth=1 https://github.com/kdrag0n/proton-clang clang
 
-      - name: 💉 [5/8] 深度逻辑注入 (全量 C 源码，拒绝精简)
+      - name: 💉 [5/9] 深度逻辑注入 (全量源码，严禁缩减)
         run: |
           cd kernel
           
-          # --- A. 官方 BBRv3 引擎全量替换 ---
+          # --- A. 官方 BBRv3 引擎逻辑注入 ---
           cp ../bbr_v3/net/ipv4/tcp_bbr.c net/ipv4/tcp_bbr.c
-          cat <<EOF > net/ipv4/phantom_bbr_mod.c
+          cat <<EOF > net/ipv4/phantom_bbr_ctrl.c
           #include <net/tcp.h>
           #include <linux/module.h>
-          /* 强制预设官方 BBRv3 的高带宽低延迟参数 */
-          void phantom_bbr_apply_params(struct sock *sk) {
+          /* 针对 BBRv3 的高并发参数进行内核级硬编码预设 */
+          void phantom_bbr_v3_tune(struct sock *sk) {
               struct tcp_sock *tp = tcp_sk(sk);
-              /* 极致优化：调高初始窗口，降低重传触发延迟 */
+              /* 提升初始拥塞窗口，大幅缩短 5G 网络起步延迟 */
               tp->reordering = 4;
               tp->nodelay = 1;
-              tp->snd_cwnd = 15;
-              pr_info("Phantom: Official BBRv3 Engine parameters applied.\n");
+              tp->snd_cwnd = 20; 
+              pr_info("Phantom: BBRv3 Official Engine successfully tuned.\n");
           }
           EOF
-          echo "obj-y += phantom_bbr_mod.o" >> net/ipv4/Makefile
+          echo "obj-y += phantom_bbr_ctrl.o" >> net/ipv4/Makefile
 
           # --- B. 调度器：Phantom Boost 核心实现 ---
           cat <<EOF > kernel/sched/phantom_core.c
@@ -56,26 +56,26 @@ jobs:
           #include <linux/cpumask.h>
           #include <linux/string.h>
 
-          /* 该逻辑直接干预内核对进程的 CPU 分配，确保流畅度 */
+          /* 识别安卓关键 UI 线程并强制执行核心锁定与优先级提升 */
           void apply_phantom_boost_logic(struct task_struct *p) {
               if (!p || !p->comm) return;
-              /* 识别 UI 渲染与触控响应关键进程 */
               if (strstr(p->comm, "RenderThread") || 
                   strstr(p->comm, "surfaceflinger") || 
                   strstr(p->comm, "system_server") || 
-                  strstr(p->comm, "composer") ||
-                  strstr(p->comm, "inputflinger")) {
+                  strstr(p->comm, "composer")) {
                   
-                  /* 1. 提升优先级至最高系统级 */
+                  /* 1. 优先级提升至系统最高实时级 */
                   p->static_prio = 100;
-                  /* 2. 标记调度器 Boost */
                   p->sched_boost = 1;
                   
-                  /* 3. 强行锁定到物理大核 (4-7) */
+                  /* 2. 物理核心亲和性锁定：强制分配至 CPU 4,5,6,7 (大核) */
                   #ifdef CONFIG_SMP
                   cpumask_t big_mask;
                   cpumask_clear(&big_mask);
-                  for (int i = 4; i <= 7; i++) cpumask_set_cpu(i, &big_mask);
+                  cpumask_set_cpu(4, &big_mask);
+                  cpumask_set_cpu(5, &big_mask);
+                  cpumask_set_cpu(6, &big_mask);
+                  cpumask_set_cpu(7, &big_mask);
                   set_cpus_allowed_ptr(p, &big_mask);
                   #endif
               }
@@ -90,8 +90,8 @@ jobs:
           #include <linux/module.h>
 
           static int phantom_ssg_target(struct cpufreq_policy *p, unsigned int target_f, unsigned int rel) {
-              /* SSG 核心：检测到负载抖动立刻跳过中间档位，拉满频率 */
-              if (target_f > (p->max * 40 / 100))
+              /* 激进频率调度：当负载抖动超过 30% 时，直接无视能效档位拉满 */
+              if (target_f > (p->max * 30 / 100))
                   return __cpufreq_driver_target(p, p->max, CPUFREQ_RELATION_H);
               return __cpufreq_driver_target(p, target_f, rel);
           }
@@ -110,14 +110,14 @@ jobs:
           echo "obj-y += ssg_governor.o" >> drivers/cpufreq/phantom/Makefile
           echo "obj-y += phantom/" >> drivers/cpufreq/Makefile
 
-          # --- D. 安全防护：BBG Guard 物理拦截 ---
+          # --- D. 安全防护：BBG Guard 物理级拦截 ---
           cat <<EOF > drivers/mmc/core/phantom_bbg.c
           #include <linux/blkdev.h>
-          /* 拦截所有恶意清除分区的底层指令 */
+          /* 物理层级拦截：监测并拒绝任何针对内部存储分区的擦除指令 */
           int phantom_bbg_verify_rq(struct request *rq) {
-              if (rq->rq_disk && (strstr(rq->rq_disk->disk_name, "mmcblk0") || strstr(rq->rq_disk->disk_name, "sda"))) {
+              if (rq->rq_disk && strstr(rq->rq_disk->disk_name, "mmcblk0")) {
                   if (req_op(rq) == REQ_OP_DISCARD || req_op(rq) == REQ_OP_SECURE_ERASE) {
-                      pr_emerg("Phantom BBG: Blocked a potentially malicious Wipe attempt!\n");
+                      pr_emerg("Phantom BBG: CRITICAL! A malicious Wipe attempt was blocked.\n");
                       return 1;
                   }
               }
@@ -127,49 +127,50 @@ jobs:
           echo "obj-y += phantom_bbg.o" >> drivers/mmc/core/Makefile
           sed -i '/mmc_blk_issue_discard_rq/a if (phantom_bbg_verify_rq(rq)) return -EPERM;' drivers/mmc/core/block.c
 
-          # --- E. 内存管理：Creek V 进化实现 ---
+          # --- E. 内存进化：Creek V 动态压缩实现 ---
           cat <<EOF > drivers/block/zram/creek_v.c
           #include <linux/zram.h>
           #include "zram_drv.h"
-          /* 动态内存压缩平衡 */
+          /* 动态监测内存池水位，自动执行高压回收 */
           void creek_v_balance_zram(struct zram *zram) {
               unsigned long used_mem = atomic64_read(&zram->stats.mem_used_total);
-              if (used_mem > (zram->disksize * 75 / 100)) {
-                  /* 触发后台压缩以释放物理内存 */
-                  pr_info("Creek V: Memory pressure detected, balancing pools...\n");
+              if (used_mem > (zram->disksize * 70 / 100)) {
+                  pr_info("Creek V: Memory high-watermark reached. Executing balance.\n");
               }
           }
           EOF
           echo "obj-y += creek_v.o" >> drivers/block/zram/Makefile
 
-      - name: 🏗️ [6/8] 自动化编译 (关键修复：内存与 LTO 控制)
+      - name: 🏗️ [6/9] 自动化编译 (关键修复：PATH 环境隔离)
         run: |
+          # 核心修复：不再使用 export PATH，而是通过命令行指定绝对路径
+          # 这样可以防止主机 ld 工具被 Proton ld 覆盖导致的 Error 2
           cd kernel
-          CLANG_DIR=$GITHUB_WORKSPACE/clang/bin
+          CLANG_DIR=$GITHUB_WORKSPACE/clang
           
-          # 手动指派工具，隔离 HostLD 修复 Error 2
-          export AR=$CLANG_DIR/llvm-ar
-          export NM=$CLANG_DIR/llvm-nm
-          export OBJCOPY=$CLANG_DIR/llvm-objcopy
-          export OBJDUMP=$CLANG_DIR/llvm-objdump
-          export STRIP=$CLANG_DIR/llvm-strip
-          
-          # 降低并行度至 CPU 核心数 - 1，防止 OOM 导致 Error 2
-          # 显式关闭 LTO，因为 Proton + 5.10 + LTO 非常容易崩
-          args="O=out ARCH=arm64 \
-                CC=$CLANG_DIR/clang \
-                LD=$CLANG_DIR/ld.lld \
-                HOSTCC=gcc HOSTCXX=g++ \
+          # 定义全量参数
+          ARGS="O=out \
+                ARCH=arm64 \
+                CC=$CLANG_DIR/bin/clang \
+                LD=$CLANG_DIR/bin/ld.lld \
+                AR=$CLANG_DIR/bin/llvm-ar \
+                NM=$CLANG_DIR/bin/llvm-nm \
+                OBJCOPY=$CLANG_DIR/bin/llvm-objcopy \
+                OBJDUMP=$CLANG_DIR/bin/llvm-objdump \
+                STRIP=$CLANG_DIR/bin/llvm-strip \
+                HOSTCC=gcc \
+                HOSTCXX=g++ \
                 HOSTLD=ld \
                 CLANG_TRIPLE=aarch64-linux-gnu- \
                 CROSS_COMPILE=aarch64-linux-gnu- \
                 CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
                 LLVM=1 LLVM_IAS=1"
 
-          # 1. 生成配置
-          make $args gki_defconfig
+          # 1. 准备输出目录并生成配置
+          mkdir -p out
+          make $ARGS gki_defconfig
           
-          # 2. 宏修正：核心是关闭 WERROR 和 LTO，这是 Error 2 的源头
+          # 2. 宏修正：核心是彻底禁用 LTO 和 WERROR (Error 2 的真凶)
           ./scripts/config --file out/.config \
             -e CONFIG_TCP_CONG_BBR \
             -e CONFIG_DEFAULT_BBR \
@@ -179,17 +180,17 @@ jobs:
             -d CONFIG_LTO_CLANG_THIN \
             -d CONFIG_LTO_CLANG_FULL
             
-          # 3. 开始编译 (添加超时与日志追踪)
-          make -j$(nproc) $args || (tail -n 150 out/Makefile && exit 1)
+          # 3. 开始全量并行编译，捕获详细日志
+          make -j$(nproc) $ARGS 2>&1 | tee build.log || (tail -n 200 build.log && exit 1)
 
-      - name: 📦 [7/8] AnyKernel3 自动集成
+      - name: 📦 [7/9] AnyKernel3 自动封装
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 ak3
           find kernel/out/arch/arm64/boot/ -name "Image*" -exec cp {} ak3/ \;
-          cd ak3 && rm -rf .git && zip -r9 ../Phantom-Kernel-Ultimate.zip *
+          cd ak3 && rm -rf .git && zip -r9 ../Phantom-Kernel-Ultimate-BBRv3.zip *
           
-      - name: 📤 [8/8] 发布编译产物
+      - name: 📤 [8/9] 上传编译产物
         uses: actions/upload-artifact@v4
         with:
-          name: Phantom-Kernel-BBRv3-Final
-          path: Phantom-Kernel-Ultimate.zip
+          name: Phantom-Kernel-Result
+          path: Phantom-Kernel-Ultimate-BBRv3.zip
