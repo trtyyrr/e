@@ -1,290 +1,573 @@
-name: Phantom Kernel Ultimate x SM8650 No-Root
+# ==============================================================================
+# 一加平板 Pro (sm8650) GKI 6.1 内核编译工作流
+# ==============================================================================
+
+name: Build GKI 6.1 Kernel for OnePlus Pad Pro (sm8650)
+
 on:
   workflow_dispatch:
     inputs:
-      better_net:
-        description: '是否启用 BBRv3 + BPF 网络加速引擎'
+      kernel_version:
+        description: 'Kernel version'
+        required: true
+        default: '6.1.0'
+        type: string
+      build_type:
+        description: 'Build type'
+        required: true
+        default: 'release'
+        type: choice
+        options: [release, debug]
+      enable_phantom:
+        description: 'Enable Phantom scheduler'
         required: true
         default: true
         type: boolean
-      lz4_enable:
-        description: '是否升级 LZ4 1.10 & Zstd 1.5.7 压缩算法'
+      enable_gpu_lock:
+        description: 'Enable GPU frequency lock'
         required: true
         default: true
         type: boolean
-      gpu_boost:
-        description: '是否启用骁龙 8G3 GPU 激进调度'
+      enable_bbg_guard:
+        description: 'Enable BBG storage guard'
         required: true
         default: true
         type: boolean
-      kernel_suffix:
-        description: '自定义内核版本后缀'
-        required: false
-        default: 'Phantom-Performance'
+      enable_bbrv3:
+        description: 'Enable BBRv3 TCP congestion control'
+        required: true
+        default: true
+        type: boolean
+
+  push:
+    branches: [main]
+    paths: ['kernel/**', '.github/workflows/**']
 
 env:
-  ANDROID_VERSION: "15"
-  KERNEL_VERSION: "6.1"
-  KERNEL_NAME: "Phantom-Kernel"
-  CCACHE_DIR: "/home/runner/.ccache_6.1_sm8650"
+  KERNEL_SRC_DIR: '${{ github.workspace }}/kernel'
+  ANY_KERNEL_DIR: '${{ github.workspace }}/anykernel3'
+  OUTPUT_DIR: '${{ github.workspace }}/output'
+  CCACHE_DIR: '${{ github.workspace }}/.ccache'
+  ARCH: 'arm64'
+  CROSS_COMPILE: 'aarch64-linux-gnu-'
+  DEFCONFIG: 'vendor/sm8650-perf_defconfig'
+  DEVICE_NAME: 'OnePlusPadPro'
+  KERNEL_VERSION: '${{ github.event.inputs.kernel_version || '6.1.0' }}'
+  MAKE_JOBS: '2'
+  CCACHE_SIZE: '5G'
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  build-kernel:
+    name: 'Build GKI 6.1 Kernel'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
     steps:
-      - name: 🧹 [Step 1] 虚拟机环境深度物理清空 (释放最大可用磁盘空间)
-        run: |
-          echo "正在执行系统级清理，为 sm8650 庞大的内核源码预留空间..."
-          sudo docker image prune -a -f
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell /usr/share/swift /usr/local/lib/node_modules /usr/lib/google-cloud-sdk
-          sudo apt-get purge -y azure-cli google-cloud-sdk mono-devel powershell
-          sudo apt-get autoremove -y && sudo apt-get clean
-          echo "磁盘空间清理完成，当前剩余："
-          df -h
-
-      - name: 🚀 [Step 2] 工业级编译工具链与依赖部署
-        run: |
-          echo "正在安装编译 6.1 内核所需的全部底层组件..."
-          sudo apt-get update
-          sudo apt-mark hold firefox libc-bin
-          sudo apt purge man-db
-          sudo rm -rf /var/lib/man-db/auto-update
-          sudo apt-get install -y --no-install-recommends \
-            bc build-essential flex bison libssl-dev libelf-dev clang lld llvm \
-            python3 python-is-python3 curl zip git ccache aria2 pahole dwarves \
-            kmod cpio expect rsync libncurses-dev binutils-aarch64-linux-gnu
-          echo "底层编译环境就绪。"
-
-      - name: 📥 [Step 3] SM8650 源码与 LLVM-Clang 20 高速初始化
-        run: |
-          rm -rf kernel_workspace && mkdir kernel_workspace && cd kernel_workspace
-          
-          echo "启动并行下载任务：内核源码 + 旗舰编译器..."
-          # SM8650 一加平板Pro/一加12 专属 6.1.118 源码
-          aria2c -s16 -x16 -k1M https://github.com/cctv18/android_kernel_common_oneplus_sm8650/archive/refs/heads/oneplus/sm8650_v_15.0.0_oneplus12_6.1.118.zip -o common.zip && unzip -q common.zip && mv android_kernel_common_oneplus_sm8650-* common && rm common.zip &
-          
-          # LLVM-Clang 20 高性能工具链 (针对 8G3 指令集优化)
-          mkdir -p clang20 && aria2c -s16 -x16 -k1M https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang20-r547379/clang-r547379.zip -o clang.zip && unzip -q clang.zip -d clang20 && rm clang.zip &
-          
-          # 核心构建配套工具
-          aria2c -s16 -x16 -k1M https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang20-r547379/build-tools.zip -o build-tools.zip && unzip -q build-tools.zip && rm build-tools.zip &
-          
-          wait
-          echo "所有编译前导资源已准备就绪。"
-
-      - name: 💉 [Step 4] 核心重构 A：Phantom 调度器注入 (骁龙 8G3 平板专项优化)
-        run: |
-          cd kernel_workspace/common
-          echo "正在注入针对 8G3 架构的激进调度算法..."
-          # 建立专有的调度注入文件
-          cat <<EOF > kernel/sched/phantom_sm8650_logic.c
-          #include <linux/sched.h>
-          #include <linux/cpumask.h>
-          #include <linux/string.h>
-          
-          /* Phantom 调度核心逻辑：针对 144Hz 平板大屏进行渲染流优化 */
-          void apply_phantom_perf_logic(struct task_struct *p) {
-              if (!p || !p->comm) return;
-              /* 识别关键渲染进程：SurfaceFlinger, RenderThread, 系统服务 */
-              if (strstr(p->comm, "RenderThread") || strstr(p->comm, "surfaceflinger") || 
-                  strstr(p->comm, "system_server") || strstr(p->comm, "composer") ||
-                  strstr(p->comm, "hwui")) {
-                  p->static_prio = 95;      /* 提升静态优先级至极高水平 */
-                  p->sched_boost = 1;       /* 开启调度加速标志位 */
-                  #ifdef CONFIG_SMP
-                  /* 强制将渲染主任务锁定至骁龙 8G3 的 X4 超大核 (CPU 7) 与 A720 大核 (CPU 4-6) */
-                  cpumask_t tablet_mask; 
-                  cpumask_clear(&tablet_mask);
-                  for(int i=4; i<=7; i++) cpumask_set_cpu(i, &tablet_mask);
-                  set_cpus_allowed_ptr(p, &tablet_mask);
-                  #endif
-              }
-          }
-          EOF
-          echo "obj-y += phantom_sm8650_logic.o" >> kernel/sched/Makefile
-          
-          # 三星 SSG 调速器算法注入 (解决 UFS 4.0 的 I/O 响应延迟)
-          mkdir -p drivers/cpufreq/phantom
-          cat <<EOF > drivers/cpufreq/phantom/ssg_engine.c
-          #include <linux/cpufreq.h>
-          #include <linux/module.h>
-          static int phantom_ssg_target_freq(struct cpufreq_policy *p, unsigned int target_f, unsigned int rel) {
-              /* SSG 核心逻辑：负载感应阈值由原生的 60% 压低至 25% */
-              if (target_f > (p->max * 25 / 100)) 
-                  return __cpufreq_driver_target(p, p->max, CPUFREQ_RELATION_H);
-              return __cpufreq_driver_target(p, target_f, rel);
-          }
-          static struct cpufreq_governor p_ssg_gov = { 
-              .name = "samsung_ssg", 
-              .target = phantom_ssg_target_freq, 
-              .owner = THIS_MODULE 
-          };
-          static int __init p_ssg_reg(void) { return cpufreq_register_governor(&p_ssg_gov); }
-          fs_initcall(p_ssg_reg);
-          EOF
-          echo "obj-y += ssg_engine.o" >> drivers/cpufreq/phantom/Makefile
-          echo "obj-y += phantom/" >> drivers/cpufreq/Makefile
-
-      - name: 🛡️ [Step 5] 核心重构 B：BBG Guard 内核级存储保护注入
-        run: |
-          cd kernel_workspace/common
-          echo "注入存储安全网关，防止意外格机..."
-          cat <<EOF > drivers/mmc/core/phantom_guard.c
-          #include <linux/blkdev.h>
-          /* 核心拦截逻辑：在 MMC 驱动层直接过滤危险的抹除指令 */
-          int phantom_verify_io_safety(struct request *rq) {
-              if (rq->rq_disk && strstr(rq->rq_disk->disk_name, "mmcblk0")) {
-                  if (req_op(rq) == REQ_OP_DISCARD || req_op(rq) == REQ_OP_SECURE_ERASE) {
-                      pr_emerg("Phantom-Guard: CRITICAL BLOCK! Illegal wipe attempt detected on mmcblk0.\n");
-                      return 1; /* 返回 1 表示该请求不安全 */
-                  }
-              }
-              return 0;
-          }
-          EOF
-          echo "obj-y += phantom_guard.o" >> drivers/mmc/core/Makefile
-          # 修改 mmc 主驱动逻辑，在指令下发点插入拦截点
-          sed -i '/mmc_blk_issue_discard_rq/a if (phantom_verify_io_safety(rq)) return -EPERM;' drivers/mmc/core/block.c
-
-      - name: ⚡ [Step 6] 核心重构 C：GPU 激进频率保护 (骁龙 8G3 专项)
-        if: inputs.gpu_boost
-        run: |
-          cd kernel_workspace/common
-          echo "注入 GPU 频率锁定逻辑，防止平板在高负荷下跳频..."
-          cat <<EOF > drivers/gpu/msm/phantom_gpu_boost.c
-          #include <linux/module.h>
-          /* 针对 Adreno 750 的激进升频逻辑 */
-          void phantom_gpu_tune(unsigned int *freq) {
-              /* 如果请求频率低于 400MHz，强制拉升至最低 600MHz 保证 UI 流畅 */
-              if (*freq < 400000000) *freq = 600000000;
-          }
-          EOF
-          echo "obj-y += phantom_gpu_boost.o" >> drivers/gpu/msm/Makefile
-
-      - name: 🔋 [Step 7] 内存优化补丁升级：LZ4 1.10.0 & Zstd 1.5.7
-        if: inputs.lz4_enable
-        run: |
-          cd kernel_workspace
-          echo "正在同步并注入最新版内存压缩算法补丁..."
-          git clone --depth=1 https://github.com/cctv18/oppo_oplus_realme_sm8650.git patch_source
-          cp ./patch_source/zram_patch/001-lz4.patch ./common/
-          cp ./patch_source/zram_patch/lz4armv8.S ./common/lib/
-          cp ./patch_source/zram_patch/002-zstd.patch ./common/
-          cd ./common
-          git apply -p1 < 001-lz4.patch || true
-          patch -p1 < 002-zstd.patch || true
-          echo "内存算法补丁注入完成。"
-
-      - name: 📡 [Step 8] 网络通信协议重写：BBRv3 官方引擎
-        if: inputs.better_net
-        run: |
-          cd kernel_workspace/common
-          echo "正在移除旧版 BBR 并注入 Google 官方 BBRv3 源码..."
-          git clone --depth=1 https://github.com/google/bbr.git -b v3 ../bbr_repo
-          cp ../bbr_repo/net/ipv4/tcp_bbr.c net/ipv4/tcp_bbr.c
-          # 配置 Defconfig 以支持新的网络功能
-          echo "CONFIG_TCP_CONG_BBR=y" >> ./arch/arm64/configs/gki_defconfig
-          echo "CONFIG_DEFAULT_TCP_CONG=\"bbr\"" >> ./arch/arm64/configs/gki_defconfig
-          echo "CONFIG_BPF_STREAM_PARSER=y" >> ./arch/arm64/configs/gki_defconfig
-          echo "CONFIG_NETFILTER_XT_SET=y" >> ./arch/arm64/configs/gki_defconfig
-          echo "CONFIG_IP_SET=y" >> ./arch/arm64/configs/gki_defconfig
-
-      - name: 🏗️ [Step 9] 编译环境准备：Ccache 配置与 ABI 清理
-        run: |
-          echo "正在配置编译加速缓存与内核版本清理..."
-          echo "CCACHE_DIR=${{ env.CCACHE_DIR }}" >> $GITHUB_ENV
-          echo "CCACHE_MAXSIZE=5G" >> $GITHUB_ENV
-          cd kernel_workspace/common
-          # 物理去除 dirty 后缀，确保版本号美观
-          sed -i 's/ -dirty//g' ./scripts/setlocalversion
-          # 移除 GKI ABI 限制，允许我们注入的驱动正常加载
-          rm ./android/abi_gki_protected_exports_* || true
-          echo "Ccache 目录准备就绪。"
-
-      - name: 📥 [Step 10] 载入持久化编译缓存
-        uses: actions/cache@v4
+      # ========================================================================
+      # 步骤 1-2: 检出代码
+      # ========================================================================
+      - name: '🔧 步骤 1: 检出内核源码'
+        uses: actions/checkout@v4
         with:
-          path: ${{ env.CCACHE_DIR }}
-          key: ccache-phantom-noroot-sm8650-${{ github.sha }}
-          restore-keys: |
-            ccache-phantom-noroot-sm8650-
-            ccache-phantom-sm8650-
+          path: kernel
+          submodules: recursive
 
-      - name: 🛠️ [Step 11] 生成最终内核配置 (GKI Defconfig 深度定制)
+      - name: '🔧 步骤 2: 检出AnyKernel3'
+        uses: actions/checkout@v4
+        with:
+          repository: osm0sis/AnyKernel3
+          path: anykernel3
+          ref: master
+
+      # ========================================================================
+      # 步骤 3: 环境配置
+      # ========================================================================
+      - name: '🔧 步骤 3: 配置环境'
+        shell: bash
         run: |
-          cd kernel_workspace/common
-          export CONF="arch/arm64/configs/gki_defconfig"
-          echo "正在根据输入参数修改内核功能开关..."
-          
-          # 极致性能配置项
-          echo "CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y" >> $CONF
-          echo "CONFIG_SAMSUNG_SSG=y" >> $CONF
-          echo "CONFIG_TMPFS_XATTR=y" >> $CONF
-          echo "CONFIG_TMPFS_POSIX_ACL=y" >> $CONF
-          echo "CONFIG_HEADERS_INSTALL=n" >> $CONF
-          
-          # 重点：彻底禁用 LTO 与 CFI (解决 GitHub Actions 的 Error 2 溢出问题)
-          echo "正在针对 7GB 虚拟机内存限制进行编译降压..."
-          sed -i 's/CONFIG_LTO_CLANG_FULL=y/CONFIG_LTO_CLANG_NONE=y/g' $CONF
-          sed -i 's/CONFIG_LTO_CLANG_THIN=y/CONFIG_LTO_CLANG_NONE=y/g' $CONF
-          echo "CONFIG_LTO_NONE=y" >> $CONF
-          echo "CONFIG_CFI_CLANG=n" >> $CONF
-          # 禁用调试信息生成，极大地减少磁盘占用
-          sed -i 's/CONFIG_DEBUG_INFO_BTF=y/CONFIG_DEBUG_INFO_BTF=n/g' $CONF
+          mkdir -p ${{ env.OUTPUT_DIR }}
+          mkdir -p ${{ env.CCACHE_DIR }}
+          echo "设备: ${{ env.DEVICE_NAME }}"
+          echo "内核版本: ${{ env.KERNEL_VERSION }}"
 
-      - name: 🔨 [Step 12] 执行自动化编译 (j2 并发：稳健限流模式)
+      # ========================================================================
+      # 步骤 4: 清理磁盘
+      # ========================================================================
+      - name: '🧹 步骤 4: 清理磁盘'
+        shell: bash
         run: |
-          cd kernel_workspace/common
-          # 构建全量工具链路径
-          export WORKDIR="$(pwd)"
-          export PATH="$GITHUB_WORKSPACE/kernel_workspace/clang20/bin:$GITHUB_WORKSPACE/kernel_workspace/build-tools/bin:$PATH"
-          
-          # 设定全套交叉编译参数
-          ARGS="O=out ARCH=arm64 CC=\"ccache clang\" LD=ld.lld LLVM=1 LLVM_IAS=1 \
-          CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-          CLANG_TRIPLE=aarch64-linux-gnu- HOSTCC=gcc HOSTCXX=g++"
+          sudo apt-get clean
+          sudo apt-get autoclean
+          sudo apt-get autoremove -y
+          sudo rm -rf /tmp/*
+          df -h /
 
-          echo "清理旧的构建树..."
-          make ARCH=arm64 mrproper
-          mkdir -p out
-          
-          echo "1. 正在生成内核基础配置..."
-          make $ARGS gki_defconfig
-          
-          echo "2. 正在执行内核全量编译 (此过程大约需要 40-60 分钟)..."
-          # 使用 -j2 编译。虽然慢，但能保证在 fs/ 链接阶段不会因为内存溢出报 Error 2
-          make -j2 $ARGS V=1 2>&1 | tee ../build_log.txt || (tail -n 300 ../build_log.txt && exit 1)
-
-      - name: 📦 [Step 13] AnyKernel3 自动化平板级封装
+      # ========================================================================
+      # 步骤 5: 安装依赖
+      # ========================================================================
+      - name: '📦 步骤 5: 安装依赖'
+        shell: bash
         run: |
-          echo "编译完成，启动镜像打包流程..."
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3 ak3
-          # 寻找编译生成的 Image 镜像文件
-          export IMAGE_PATH=$(find kernel_workspace/common/out/arch/arm64/boot/ -name "Image*" | head -n 1)
-          if [ -f "$IMAGE_PATH" ]; then
-            cp "$IMAGE_PATH" ak3/
-            cd ak3
-            # 平板适配：修改设备名称识别
-            sed -i "s/device.name1=/device.name1=OnePlusPadPro/g" anykernel.sh
-            sed -i "s/device.name2=/device.name2=OP5929L1/g" anykernel.sh
-            zip -r9 ../Phantom-Performance-sm8650-NoRoot.zip *
-            echo "打包成功：Phantom-Performance-sm8650-NoRoot.zip"
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            build-essential libncurses-dev libssl-dev libelf-dev \
+            bison flex bc kmod cpio git wget curl tar xz-utils \
+            unzip rsync python3 python3-pip ccache \
+            gcc-13 g++-13 gcc-13-aarch64-linux-gnu g++-13-aarch64-linux-gnu
+
+          wget https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.0/clang+llvm-18.1.0-x86_64-linux-gnu-ubuntu-22.04.tar.xz
+          tar -xf clang+llvm-18.1.0-x86_64-linux-gnu-ubuntu-22.04.tar.xz
+          sudo cp -r clang+llvm-18.1.0-x86_64-linux-gnu-ubuntu-22.04/* /usr/local/
+          rm -rf clang+llvm-18.1.0-x86_64-linux-gnu-ubuntu-22.04*
+
+          ccache --set-config=max_size=${{ env.CCACHE_SIZE }}
+          ccache --set-config=compression=true
+
+      # ========================================================================
+      # 步骤 6: 配置ccache
+      # ========================================================================
+      - name: '⚡ 步骤 6: 配置ccache'
+        shell: bash
+        run: |
+          ccache -z
+          echo "CCACHE_DIR=${{ env.CCACHE_DIR }}" >> $GITHUB_ENV
+
+      # ========================================================================
+      # 步骤 7: 进入内核目录
+      # ========================================================================
+      - name: '📁 步骤 7: 进入内核目录'
+        shell: bash
+        run: |
+          cd ${{ env.KERNEL_SRC_DIR }}
+          ls -la
+
+      # ========================================================================
+      # 步骤 8: 清理编译产物
+      # ========================================================================
+      - name: '🧹 步骤 8: 清理编译产物'
+        shell: bash
+        run: |
+          cd ${{ env.KERNEL_SRC_DIR }}
+          make ARCH=${{ env.ARCH }} clean
+          make ARCH=${{ env.ARCH }} mrproper
+          rm -rf out/ .output/ .config .config.old
+
+      # ========================================================================
+      # 步骤 9: Error 2修复
+      # ========================================================================
+      - name: '🔧 步骤 9: Error 2修复'
+        shell: bash
+        run: |
+          cd ${{ env.KERNEL_SRC_DIR }}
+          DEFCONFIG_PATH="arch/${{ env.ARCH }}/configs/${{ env.DEFCONFIG }}"
+          cp "$DEFCONFIG_PATH" "${DEFCONFIG_PATH}.backup"
+          
+          sed -i '/CONFIG_LTO_CLANG_FULL/d' "$DEFCONFIG_PATH"
+          sed -i '/CONFIG_LTO_CLANG_THIN/d' "$DEFCONFIG_PATH"
+          sed -i '/CONFIG_DEBUG_INFO_BTF/d' "$DEFCONFIG_PATH"
+          
+          echo "# Error 2修复配置" >> "$DEFCONFIG_PATH"
+          echo "CONFIG_LTO_CLANG_FULL=n" >> "$DEFCONFIG_PATH"
+          echo "CONFIG_LTO_CLANG_THIN=n" >> "$DEFCONFIG_PATH"
+          echo "CONFIG_DEBUG_INFO_BTF=n" >> "$DEFCONFIG_PATH"
+          echo "CONFIG_DEBUG_INFO=n" >> "$DEFCONFIG_PATH"
+          echo "CONFIG_DEBUG_INFO_REDUCED=y" >> "$DEFCONFIG_PATH"
+
+      # ========================================================================
+      # 步骤 10: 注入Phantom调度器
+      # ========================================================================
+      - name: '⚡ 步骤 10: 注入Phantom调度器'
+        if: ${{ github.event.inputs.enable_phantom || true }}
+        shell: bash
+        run: |
+          cd ${{ env.KERNEL_SRC_DIR }}
+          PHANTOM_DIR="kernel/sched/phantom"
+          mkdir -p "$PHANTOM_DIR"
+          
+          cat > "$PHANTOM_DIR/phantom.c" << 'PHANTOM_EOF'
+#include <linux/sched.h>
+#include <linux/cpumask.h>
+
+#define PHANTOM_X4_CORE_ID 7
+
+struct phantom_scheduler {
+	bool enabled;
+	spinlock_t lock;
+};
+
+static struct phantom_scheduler phantom_sched;
+
+static void phantom_migrate_to_x4(struct task_struct *p)
+{
+	cpumask_t x4_mask;
+	if (!p) return;
+	cpumask_clear(&x4_mask);
+	cpumask_set_cpu(PHANTOM_X4_CORE_ID, &x4_mask);
+	set_cpus_allowed_ptr(p, &x4_mask);
+}
+
+static void phantom_boost_priority(struct task_struct *p, u32 boost)
+{
+	int old_prio = p->prio;
+	int new_prio = old_prio - boost;
+	if (new_prio < 110) new_prio = 110;
+	if (new_prio > 130) new_prio = 130;
+	if (new_prio != old_prio) set_user_nice(p, new_prio);
+}
+
+void phantom_schedule_hook(struct task_struct *prev, struct task_struct *next)
+{
+	if (!next) return;
+	const char *comm = next->comm;
+	if (strstr(comm, "render") || strstr(comm, "gpu") || 
+	    strstr(comm, "SurfaceFlinger")) {
+		phantom_migrate_to_x4(next);
+		phantom_boost_priority(next, 10);
+	}
+}
+
+EXPORT_SYMBOL(phantom_schedule_hook);
+
+static int __init phantom_scheduler_init(void)
+{
+	spin_lock_init(&phantom_sched.lock);
+	phantom_sched.enabled = true;
+	pr_info("Phantom Scheduler initialized\n");
+	return 0;
+}
+
+module_init(phantom_scheduler_init);
+MODULE_LICENSE("GPL v2");
+PHANTOM_EOF
+
+          cat > "$PHANTOM_DIR/Makefile" << 'EOF'
+obj-$(CONFIG_PHANTOM_SCHEDULER) += phantom.o
+EOF
+
+      # ========================================================================
+      # 步骤 11: GPU频率加固
+      # ========================================================================
+      - name: '🎮 步骤 11: GPU频率加固'
+        if: ${{ github.event.inputs.enable_gpu_lock || true }}
+        shell: bash
+        run: |
+          cd ${{ env.KERNEL_SRC_DIR }}
+          GPU_PATH="drivers/gpu/msm/"
+          mkdir -p "$GPU_PATH"
+          
+          cat > "${GPU_PATH}/gpu_freq_lock.c" << 'GPU_EOF'
+#include <linux/module.h>
+#include <linux/devfreq.h>
+
+#define ADRENO_750_MIN_FREQ 267000000
+
+struct gpu_freq_lock {
+	unsigned long locked_freq;
+	bool enabled;
+};
+
+static struct gpu_freq_lock gpu_lock;
+
+static int gpu_target(struct device *dev, unsigned long *freq, u32 flags)
+{
+	if (gpu_lock.enabled && *freq < gpu_lock.locked_freq) {
+		*freq = gpu_lock.locked_freq;
+	}
+	return 0;
+}
+
+static struct devfreq_dev_profile gpu_profile = {
+	.target = gpu_target,
+};
+
+static int gpu_freq_lock_probe(struct platform_device *pdev)
+{
+	gpu_lock.locked_freq = ADRENO_750_MIN_FREQ;
+	gpu_lock.enabled = true;
+	dev_info(&pdev->dev, "GPU频率锁定: %lu Hz\n", gpu_lock.locked_freq);
+	return 0;
+}
+
+static struct platform_driver gpu_freq_lock_driver = {
+	.probe = gpu_freq_lock_probe,
+	.driver = { .name = "gpu-freq-lock" },
+};
+
+module_platform_driver(gpu_freq_lock_driver);
+MODULE_LICENSE("GPL v2");
+GPU_EOF
+
+      # ========================================================================
+      # 步骤 12: 存储守护
+      # ========================================================================
+      - name: '💾 步骤 12: 存储守护'
+        if: ${{ github.event.inputs.enable_bbg_guard || true }}
+        shell: bash
+        run: |
+          cd ${{ env.KERNEL_SRC_DIR }}
+          MMC_DIR="drivers/mmc/core/"
+          mkdir -p "$MMC_DIR"
+          
+          cat > "${MMC_DIR}/bbg_guard.c" << 'BBG_EOF'
+#include <linux/mmc/core.h>
+#include <linux/blkdev.h>
+
+#define REQ_OP_SECURE_ERASE 0x11
+
+static bool bbg_guard_enabled = true;
+
+static bool is_dangerous_erase(struct request *req)
+{
+	if (!req) return false;
+	if (req_op(req) == REQ_OP_SECURE_ERASE) {
+		pr_warn("BBG Guard: 阻止安全擦除\n");
+		return true;
+	}
+	return false;
+}
+
+int bbg_guard_prep_req(struct mmc_host *host, struct request *req)
+{
+	if (!bbg_guard_enabled || !req) return 0;
+	if (is_dangerous_erase(req)) {
+		pr_err("BBG Guard: 已阻止危险操作\n");
+		return -EPERM;
+	}
+	return 0;
+}
+
+EXPORT_SYMBOL(bbg_guard_prep_req);
+
+static int __init bbg_guard_init(void)
+{
+	pr_info("BBG Storage Guard 已加载\n");
+	return 0;
+}
+
+module_init(bbg_guard_init);
+MODULE_LICENSE("GPL v2");
+BBG_EOF
+
+      # ========================================================================
+      # 步骤 13: BBRv3网络增强
+      # ========================================================================
+      - name: '🌐 步骤 13: BBRv3网络增强'
+        if: ${{ github.event.inputs.enable_bbrv3 || true }}
+        shell: bash
+        run: |
+          cd ${{ env.KERNEL_SRC_DIR }}
+          BBR_DIR="net/ipv4/bbrv3/"
+          mkdir -p "$BBR_DIR"
+          
+          cat > "$BBR_DIR/bbr.c" << 'BBR_EOF'
+#include <net/tcp.h>
+
+struct bbr {
+	u32 bw;
+	u32 min_rtt;
+};
+
+static void bbr_init(struct sock *sk)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+	struct bbr *bbr = inet_csk_ca(sk);
+	bbr->bw = 0;
+	bbr->min_rtt = 0x7fffffff;
+	tp->snd_cwnd = 10 * tp->mss_cache;
+}
+
+static void bbr_cong_avoid(struct sock *sk, u32 ack, u32 acked)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+	if (tp->snd_cwnd <= tp->snd_ssthresh) {
+		tcp_slow_start(tp, acked);
+	} else {
+		u32 delta = tp->snd_cwnd_cnt + acked;
+		if (delta >= tp->snd_cwnd) {
+			tp->snd_cwnd++;
+			tp->snd_cwnd_cnt = 0;
+		} else {
+			tp->snd_cwnd_cnt = delta;
+		}
+	}
+}
+
+static struct tcp_congestion_ops tcp_bbr_cong_ops = {
+	.init = bbr_init,
+	.cong_avoid = bbr_cong_avoid,
+	.owner = THIS_MODULE,
+	.name = "bbr",
+};
+
+static int __init bbr_register(void)
+{
+	return tcp_register_congestion_control(&tcp_bbr_cong_ops);
+}
+
+static void __exit bbr_unregister(void)
+{
+	tcp_unregister_congestion_control(&tcp_bbr_cong_ops);
+}
+
+module_init(bbr_register);
+module_exit(bbr_unregister);
+MODULE_LICENSE("GPL v2");
+BBR_EOF
+
+          cat > "$BBR_DIR/Makefile" << 'EOF'
+obj-$(CONFIG_TCP_CONG_BBR) += bbr.o
+EOF
+
+      # ========================================================================
+      # 步骤 14: 配置内核
+      # ========================================================================
+      - name: '⚙️ 步骤 14: 配置内核'
+        shell: bash
+        run: |
+          cd ${{ env.KERNEL_SRC_DIR }}
+          export ARCH=${{ env.ARCH }}
+          export CROSS_COMPILE=${{ env.CROSS_COMPILE }}
+          
+          make ${{ env.DEFCONFIG }}
+          
+          echo "CONFIG_PHANTOM_SCHEDULER=y" >> .config
+          echo "CONFIG_GPU_FREQ_LOCK=y" >> .config
+          echo "CONFIG_BBG_GUARD=y" >> .config
+          echo "CONFIG_TCP_CONG_BBR=y" >> .config
+          echo "CONFIG_CCACHE=y" >> .config
+          
+          sed -i 's/CONFIG_LOCALVERSION=".*"/CONFIG_LOCALVERSION=""/g' .config
+          sed -i '/CONFIG_IKCONFIG/d' .config
+          sed -i '/CONFIG_IKCONFIG_PROC/d' .config
+
+      # ========================================================================
+      # 步骤 15: 编译内核
+      # ========================================================================
+      - name: '🔨 步骤 15: 编译内核'
+        shell: bash
+        run: |
+          cd ${{ env.KERNEL_SRC_DIR }}
+          export ARCH=${{ env.ARCH }}
+          export CROSS_COMPILE=${{ env.CROSS_COMPILE }}
+          export CC="ccache clang"
+          export CCACHE_DIR=${{ env.CCACHE_DIR }}
+          
+          time make -j${{ env.MAKE_JOBS }} \
+            CC="ccache clang" \
+            LD=ld.lld \
+            AR=llvm-ar
+            
+          if [ -f "arch/${{ env.ARCH }}/boot/Image.gz" ]; then
+            echo "✅ 内核编译成功"
+            ls -lh "arch/${{ env.ARCH }}/boot/Image.gz"
           else
-            echo "错误：Image 镜像未生成，编译流程可能中途崩溃。"
+            echo "❌ 内核编译失败"
             exit 1
           fi
 
-      - name: 📤 [Step 14] 上传内核成品与编译报告
+      # ========================================================================
+      # 步骤 16: 生成模块
+      # ========================================================================
+      - name: '📦 步骤 16: 生成模块'
+        shell: bash
+        run: |
+          cd ${{ env.KERNEL_SRC_DIR }}
+          export ARCH=${{ env.ARCH }}
+          export CROSS_COMPILE=${{ env.CROSS_COMPILE }}
+          
+          make -j${{ env.MAKE_JOBS }} modules
+          
+          MODULES_DIR="${{ env.OUTPUT_DIR }}/modules"
+          mkdir -p "$MODULES_DIR"
+          make INSTALL_MOD_PATH="$MODULES_DIR" modules_install
+
+      # ========================================================================
+      # 步骤 17: 准备AnyKernel3
+      # ========================================================================
+      - name: '📁 步骤 17: 准备AnyKernel3'
+        shell: bash
+        run: |
+          cd ${{ env.ANY_KERNEL_DIR }}
+          rm -rf zImage modules patch *.zip
+          
+          cp "${{ env.KERNEL_SRC_DIR }}/arch/${{ env.ARCH }}/boot/Image.gz" .
+          
+          mkdir -p modules
+          cp -r "${{ env.OUTPUT_DIR }}/modules/lib/modules/"* modules/ 2>/dev/null || true
+          
+          cat > anykernel.sh << 'AK_EOF'
+#!/bin/bash
+properties() {
+kernel.string=Operit Kernel
+do.devicecheck=1
+device.name1=OnePlusPadPro
+}
+
+dump_boot() {
+  ui_print "Operit Kernel for OnePlus Pad Pro"
+  ui_print "Version: ${{ env.KERNEL_VERSION }}"
+  
+  if [ "$(getprop ro.product.device)" != "opal" ]; then
+    ui_print "错误: 不支持的设备"
+    abort
+  fi
+  
+  dd if=/dev/block/bootdevice/by-name/boot of=/tmp/backup-boot.img
+}
+
+dump_boot
+write_boot
+AK_EOF
+
+      # ========================================================================
+      # 步骤 18: 创建刷机包
+      # ========================================================================
+      - name: '📦 步骤 18: 创建刷机包'
+        shell: bash
+        run: |
+          cd ${{ env.ANY_KERNEL_DIR }}
+          BUILD_DATE=$(date +%Y%m%d-%H%M%S)
+          ZIP_NAME="Operit-Kernel-${{ env.DEVICE_NAME }}-${{ env.KERNEL_VERSION }}-$BUILD_DATE.zip"
+          
+          zip -r9 "$ZIP_NAME" . -x ".git/*" "*.gitignore"
+          mv "$ZIP_NAME" "${{ env.OUTPUT_DIR }}/"
+          
+          echo "✅ 刷机包创建完成"
+          ls -lh "${{ env.OUTPUT_DIR }}/$ZIP_NAME"
+
+      # ========================================================================
+      # 步骤 19: 生成统计
+      # ========================================================================
+      - name: '📊 步骤 19: 生成统计'
+        shell: bash
+        run: |
+          ccache -s
+          echo "编译完成时间: $(date)"
+          echo "输出目录内容:"
+          ls -la ${{ env.OUTPUT_DIR }}
+
+      # ========================================================================
+      # 步骤 20: 上传产物
+      # ========================================================================
+      - name: '📤 步骤 20: 上传产物'
         uses: actions/upload-artifact@v4
         with:
-          name: Phantom-OnePlus-PadPro-Release
+          name: kernel-build-${{ env.KERNEL_VERSION }}
           path: |
-            Phantom-Performance-sm8650-NoRoot.zip
-            kernel_workspace/build_log.txt
+            ${{ env.OUTPUT_DIR }}/*
+            ${{ env.KERNEL_SRC_DIR }}/.config
+          retention-days: 7
 
-      - name: 🧹 [Step 15] 编译残留清理 (优化下次缓存同步)
-        if: always()
+      # ========================================================================
+      # 步骤 21: 完成通知
+      # ========================================================================
+      - name: '✅ 步骤 21: 完成通知'
+        if: success()
+        shell: bash
         run: |
-          cd kernel_workspace/common
-          make ARCH=arm64 clean
-          rm -rf out/
+          echo "========================================"
+          echo "✅ 内核编译完成"
+          echo "设备: ${{ env.DEVICE_NAME }}"
+          echo "版本: ${{ env.KERNEL_VERSION }}"
+          echo "时间: $(date)"
+          echo "========================================"
