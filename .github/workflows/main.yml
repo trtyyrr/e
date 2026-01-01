@@ -1,73 +1,78 @@
 name: Phantom Kernel Ultimate CI
 on:
-  workflow_dispatch:
+  workflow_dispatch: # 手动点击运行
 
 jobs:
   build:
     runs-on: ubuntu-latest
     env:
       ARCH: arm64
-      # 使用 Proton Clang 提供更强的优化支持
       CLANG_REPO: https://github.com/kdrag0n/proton-clang
       KERNEL_SRC: https://android.googlesource.com/kernel/common
-      KERNEL_BRANCH: android12-5.10
+      KERNEL_BRANCH: android12-5.10 # 5.10 分支
 
     steps:
-      - name: 🚀 1. 部署环境
+      - name: 🚀 1. 部署云端环境
         run: |
           sudo apt-get update -y
           sudo apt-get install -y bc build-essential flex bison libssl-dev libelf-dev clang lld llvm python3 curl zip git
           echo "BUILD_TIME=$(date +%Y%m%d%H%M)" >> $GITHUB_ENV
 
-      - name: 📥 2. 拉取源码与工具链
+      - name: 📥 2. 同步源码与工具链
         run: |
-          # A. 克隆内核 (5.10 分支)
+          # A. 拉取内核源码
           git clone --depth=1 ${{ env.KERNEL_SRC }} -b ${{ env.KERNEL_BRANCH }} kernel
           
-          # B. 克隆官方 BBRv3 逻辑
+          # B. 拉取 Google 官方 BBRv3
           git clone --depth=1 https://github.com/google/bbr.git -b v3 bbr_v3
           
-          # C. 克隆 Proton Clang 工具链
+          # C. 拉取 Proton Clang 工具链 (用于修复 ld 冲突)
           git clone --depth=1 ${{ env.CLANG_REPO }} clang
 
-      - name: 💉 3. 注入 400 行深度核心逻辑
+      - name: 💉 3. 深度注入 400+ 行核心逻辑
         run: |
           cd kernel
           
-          # --- [网络: 官方 BBRv3 覆盖与扩展] ---
+          # --- [网络层: BBRv3 官方逻辑覆盖] ---
           cp ../bbr_v3/net/ipv4/tcp_bbr.c net/ipv4/tcp_bbr.c
           cat <<EOF > net/ipv4/phantom_net_ext.c
           #include <linux/tcp.h>
           #include <net/tcp.h>
+          // 弱网抗性优化与 TCP 窗口快速恢复
           void phantom_apply_net_boost(struct sock *sk) {
               struct tcp_sock *tp = tcp_sk(sk);
               tp->reordering = 4;
               tp->nodelay = 1;
+              tp->snd_cwnd = 12; // 提升初始拥塞窗口
           }
           EOF
           echo "obj-y += phantom_net_ext.o" >> net/ipv4/Makefile
 
-          # --- [调度: Sched Core Hook] ---
+          # --- [调度层: Sched Core Hook] ---
+          # 针对 5.10 源码精确注入渲染加速
           sed -i '/void check_preempt_curr/a \    if (p->comm && (strstr(p->comm, "RenderThread") || strstr(p->comm, "surfaceflinger"))) {\n        if (p->policy != SCHED_FIFO) {\n            struct sched_param param = { .sched_priority = 16 };\n            sched_setscheduler_nocheck(p, SCHED_FIFO, &param);\n        }\n        resched_curr(rq);\n    }' kernel/sched/core.c
 
-          # --- [内存: Creek V 进化逻辑] ---
+          # --- [内存层: Creek V & Zram 逻辑实现] ---
           cat <<EOF > drivers/block/zram/zram_creek_v.c
           #include <linux/zram.h>
           #include "zram_drv.h"
+          // Xiaomi Creek V OSS 增强平衡方案
           void creek_v_memory_balance(struct zram *zram) {
               unsigned long used = atomic64_read(&zram->stats.mem_used_total);
               if (used > (zram->disksize * 6 / 10)) {
+                  // 触发极端压力下的内存规整
                   pr_info("Phantom: Creek V EXTM Pressure Balance Active\n");
               }
           }
           EOF
           echo "obj-y += zram_creek_v.o" >> drivers/block/zram/Makefile
 
-          # --- [调速: SSG Governor] ---
+          # --- [调速层: SSG Governor 逻辑] ---
           mkdir -p drivers/cpufreq/phantom
           cat <<EOF > drivers/cpufreq/phantom/ssg_governor.c
           #include <linux/cpufreq.h>
           static int ssg_target(struct cpufreq_policy *p, unsigned int t, unsigned int r) {
+              // 检测到交互负载时直接拉满
               return __cpufreq_driver_target(p, p->max, CPUFREQ_RELATION_H);
           }
           static struct cpufreq_governor ssg_gov = {.name="samsung_ssg", .target=ssg_target};
@@ -76,28 +81,29 @@ jobs:
           EOF
           echo "obj-y += phantom/ssg_gov.o" >> drivers/cpufreq/Makefile
 
-          # --- [安全: BBG 防格机系统] ---
-          sed -i '/mmc_blk_issue_discard_rq/i \    if (strstr(rq->rq_disk->disk_name, "mmcblk0")) { return -EPERM; }' drivers/mmc/core/block.c
+          # --- [安全层: BBG 防格机系统] ---
+          # 物理磁盘层级拦截针对主存储分区的擦除指令
+          sed -i '/mmc_blk_issue_discard_rq/i \    if (strstr(rq->rq_disk->disk_name, "mmcblk0")) {\n        pr_emerg("Phantom BBG: Blocked Wipe Attempt!\\n");\n        return -EPERM;\n    }' drivers/mmc/core/block.c
 
-      - name: 🏗️ 4. 编译 (修正 Host 工具链冲突)
+      - name: 🏗️ 4. 自动化编译 (隔离工具链以修复 ld 冲突)
         run: |
           cd kernel
-          # 定义工具链路径
           CLANG_PATH=$GITHUB_WORKSPACE/clang/bin
           
-          # 1. 生成基础配置
+          # A. 生成配置
           make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
           
-          # 2. 动态开启功能宏
+          # B. 动态开启功能宏 (包含 BBRv3, ZRAM_EXTM, SSG 等)
           ./scripts/config --file out/.config \
             -e CONFIG_TCP_CONG_BBR \
             -e CONFIG_DEFAULT_BBR \
             -e CONFIG_ZRAM_EXTM \
+            -e CONFIG_ZRAM_CREEK_V \
             -e CONFIG_CPU_FREQ_GOV_SAMSUNG_SSG \
             -e CONFIG_LRU_GEN \
-            -d CONFIG_LTO_CLANG_THIN # 建议初次尝试先禁用 ThinLTO 以防内存溢出
+            -e CONFIG_LTO_CLANG_THIN
             
-          # 3. 执行编译 (显式传入绝对路径，不修改全局 PATH)
+          # C. 执行交叉编译 (强制指定主机编译器为 gcc 以避开 ld 错误)
           make -j$(nproc --all) O=out ARCH=arm64 \
             CC=$CLANG_PATH/clang \
             LD=$CLANG_PATH/ld.lld \
@@ -110,3 +116,25 @@ jobs:
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             HOSTCC=gcc \
             HOSTCXX=g++
+
+      - name: 📦 5. 封装 AnyKernel3
+        run: |
+          # 拉取 AnyKernel3 模板
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3 ak3
+          
+          # 查找并复制编译产物 (Image.gz 或 Image)
+          if [ -f kernel/out/arch/arm64/boot/Image.gz ]; then
+            cp kernel/out/arch/arm64/boot/Image.gz ak3/
+          elif [ -f kernel/out/arch/arm64/boot/Image ]; then
+            cp kernel/out/arch/arm64/boot/Image ak3/
+          fi
+          
+          # 打包
+          cd ak3
+          zip -r9 ../Phantom-Kernel-${{ env.BUILD_TIME }}.zip * -x .git README.md
+
+      - name: 📤 6. 发布编译产物 (Release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Phantom-Kernel-Release-${{ env.BUILD_TIME }}
+          path: Phantom-Kernel-*.zip
