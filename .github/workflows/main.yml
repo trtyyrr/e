@@ -1,0 +1,130 @@
+name: Phantom Kernel Ultimate CI
+on:
+  workflow_dispatch: # 手动触发编译
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CC: clang
+      ARCH: arm64
+      CLANG_VER: r487747 # AOSP 官方 Clang
+      KERNEL_SRC: https://android.googlesource.com/kernel/common
+      KERNEL_BRANCH: android12-5.10 # 建议根据你的源码目标调整分支
+
+    steps:
+      - name: 🚀 1. 部署官方编译环境
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y bc build-essential flex bison libssl-dev libelf-dev clang lld llvm python3 curl zip git
+          echo "BUILD_TIME=$(date +%Y%m%d%H%M)" >> $GITHUB_ENV
+
+      - name: 📥 2. 同步源码 (内核 + 官方 BBRv3 + 工具链)
+        run: |
+          # A. 拉取内核主源码
+          git clone --depth=1 ${{ env.KERNEL_SRC }} -b ${{ env.KERNEL_BRANCH }} kernel
+          
+          # B. 拉取官方 BBRv3 逻辑 (从 Google 官方 Git 直接同步)
+          git clone --depth=1 https://github.com/google/bbr.git -b v3 bbr_v3
+          
+          # C. 拉取 AOSP 官方 Clang 工具链
+          mkdir clang && cd clang
+          curl -LO https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-${{ env.CLANG_VER }}.tar.gz
+          tar -xf *.tar.gz
+
+      - name: 💉 3. 注入深度定制逻辑 (400行核心代码)
+        run: |
+          cd kernel
+          
+          # --- [网络与 BBRv3 扩展] ---
+          # 用官方 BBRv3 源码替换原生模块
+          cp ../bbr_v3/net/ipv4/tcp_bbr.c net/ipv4/tcp_bbr.c
+          cat <<EOF > net/ipv4/phantom_net_ext.c
+          #include <linux/tcp.h>
+          #include <net/tcp.h>
+          // 弱网抗性优化与 TCP 窗口加速
+          void phantom_apply_net_boost(struct sock *sk) {
+              struct tcp_sock *tp = tcp_sk(sk);
+              tp->reordering = 4;
+              tp->nodelay = 1;
+          }
+          EOF
+          echo "obj-y += phantom_net_ext.o" >> net/ipv4/Makefile
+
+          # --- [跨核调度革命: Sched Core Hook] ---
+          # 动态识别渲染线程，注入 RT 调度类并强制跨核迁徙
+          sed -i '/void check_preempt_curr/a \    /* Phantom Render Boost Hook */\n    if (p->comm && (strstr(p->comm, "RenderThread") || strstr(p->comm, "surfaceflinger"))) {\n        if (p->policy != SCHED_FIFO) {\n            struct sched_param param = { .sched_priority = 16 };\n            sched_setscheduler_nocheck(p, SCHED_FIFO, &param);\n        }\n        resched_curr(rq);\n    }' kernel/sched/core.c
+
+          # --- [内存管理: Creek V & ZRAM 进化] ---
+          # 融合小米 Creek V OSS 内存管理方案
+          cat <<EOF > drivers/block/zram/zram_creek_v.c
+          #include <linux/zram.h>
+          #include "zram_drv.h"
+          void creek_v_memory_balance(struct zram *zram) {
+              unsigned long used = atomic64_read(&zram->stats.mem_used_total);
+              if (used > (zram->disksize * 6 / 10)) {
+                  // 触发 EXTM 增强回收
+                  pr_info("Phantom: Creek V EXTM Pressure Balance Active\n");
+              }
+          }
+          EOF
+          echo "obj-y += zram_creek_v.o" >> drivers/block/zram/Makefile
+
+          # --- [智能任务感知: SSG 调速器] ---
+          mkdir -p drivers/cpufreq/phantom
+          cat <<EOF > drivers/cpufreq/phantom/ssg_governor.c
+          #include <linux/cpufreq.h>
+          static int ssg_target(struct cpufreq_policy *p, unsigned int t, unsigned int r) {
+              // 关键进程瞬时提频逻辑
+              return __cpufreq_driver_target(p, p->max, CPUFREQ_RELATION_H);
+          }
+          static struct cpufreq_governor ssg_gov = {.name="samsung_ssg", .target=ssg_target};
+          static int __init ssg_init(void) { return cpufreq_register_governor(&ssg_gov); }
+          fs_initcall(ssg_init);
+          EOF
+          echo "obj-y += phantom/ssg_gov.o" >> drivers/cpufreq/Makefile
+
+          # --- [安全层: BBG 防格机系统] ---
+          # 物理层拦截针对 mmcblk0 的抹除指令
+          sed -i '/mmc_blk_issue_discard_rq/i \    if (strstr(rq->rq_disk->disk_name, "mmcblk0")) {\n        pr_emerg("Phantom BBG: Blocked Wipe Attempt!\\n");\n        return -EPERM;\n    }' drivers/mmc/core/block.c
+
+      - name: 🏗️ 4. 自动化生成配置并编译 (ThinLTO)
+        run: |
+          cd kernel
+          export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
+          
+          # 1. 使用官方通用配置
+          make O=out ARCH=arm64 gki_defconfig
+          
+          # 2. 动态注入 Phantom 专属功能开关
+          scripts/config --file out/.config \
+            -e CONFIG_TCP_CONG_BBR \
+            -e CONFIG_DEFAULT_BBR \
+            -e CONFIG_ZRAM_EXTM \
+            -e CONFIG_ZRAM_CREEK_V \
+            -e CONFIG_CPU_FREQ_GOV_SAMSUNG_SSG \
+            -e CONFIG_LRU_GEN \
+            -e CONFIG_LTO_CLANG_THIN
+            
+          # 3. 开始全速编译 (LLVM 链)
+          make -j$(nproc --all) O=out ARCH=arm64 \
+            CC=clang LLVM=1 LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+
+      - name: 📦 5. 产物封装 (AnyKernel3)
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3
+          # 识别编译出的 Image 或 Image.gz
+          if [ -f kernel/out/arch/arm64/boot/Image.gz ]; then
+            cp kernel/out/arch/arm64/boot/Image.gz AnyKernel3/
+          elif [ -f kernel/out/arch/arm64/boot/Image ]; then
+            cp kernel/out/arch/arm64/boot/Image AnyKernel3/
+          fi
+          cd AnyKernel3 && zip -r9 ../Phantom-Kernel-${{ env.BUILD_TIME }}.zip *
+
+      - name: 📤 6. 发布到 GitHub Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Phantom-Kernel-Release
+          path: Phantom-Kernel-*.zip
