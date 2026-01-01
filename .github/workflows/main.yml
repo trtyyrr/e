@@ -17,7 +17,9 @@ on:
         required: true
         default: 'release'
         type: choice
-        options: [release, debug]
+        options:
+          - release
+          - debug
       enable_phantom:
         description: 'Enable Phantom scheduler'
         required: true
@@ -41,7 +43,9 @@ on:
 
   push:
     branches: [main]
-    paths: ['kernel/**', '.github/workflows/**']
+    paths:
+      - 'kernel/**'
+      - '.github/workflows/**'
 
 env:
   KERNEL_SRC_DIR: '${{ github.workspace }}/kernel'
@@ -52,7 +56,7 @@ env:
   CROSS_COMPILE: 'aarch64-linux-gnu-'
   DEFCONFIG: 'vendor/sm8650-perf_defconfig'
   DEVICE_NAME: 'OnePlusPadPro'
-  KERNEL_VERSION: '${{ github.event.inputs.kernel_version || '6.1.0' }}'
+  KERNEL_VERSION: '${{ github.event.inputs.kernel_version || ''6.1.0'' }}'
   MAKE_JOBS: '2'
   CCACHE_SIZE: '5G'
 
@@ -66,13 +70,13 @@ jobs:
       # ========================================================================
       # 步骤 1-2: 检出代码
       # ========================================================================
-      - name: '🔧 步骤 1: 检出内核源码'
+      - name: '步骤 1: 检出内核源码'
         uses: actions/checkout@v4
         with:
           path: kernel
           submodules: recursive
 
-      - name: '🔧 步骤 2: 检出AnyKernel3'
+      - name: '步骤 2: 检出AnyKernel3'
         uses: actions/checkout@v4
         with:
           repository: osm0sis/AnyKernel3
@@ -82,7 +86,7 @@ jobs:
       # ========================================================================
       # 步骤 3: 环境配置
       # ========================================================================
-      - name: '🔧 步骤 3: 配置环境'
+      - name: '步骤 3: 配置环境'
         shell: bash
         run: |
           mkdir -p ${{ env.OUTPUT_DIR }}
@@ -93,7 +97,7 @@ jobs:
       # ========================================================================
       # 步骤 4: 清理磁盘
       # ========================================================================
-      - name: '🧹 步骤 4: 清理磁盘'
+      - name: '步骤 4: 清理磁盘'
         shell: bash
         run: |
           sudo apt-get clean
@@ -105,7 +109,7 @@ jobs:
       # ========================================================================
       # 步骤 5: 安装依赖
       # ========================================================================
-      - name: '📦 步骤 5: 安装依赖'
+      - name: '步骤 5: 安装依赖'
         shell: bash
         run: |
           sudo apt-get update -y
@@ -126,16 +130,16 @@ jobs:
       # ========================================================================
       # 步骤 6: 配置ccache
       # ========================================================================
-      - name: '⚡ 步骤 6: 配置ccache'
+      - name: '步骤 6: 配置ccache'
         shell: bash
         run: |
           ccache -z
-          echo "CCACHE_DIR=${{ env.CCACHE_DIR }}" >> $GITHUB_ENV
+          echo "CCACHE_DIR=${{ env.CCACHE_DIR }}" | tee -a $GITHUB_ENV
 
       # ========================================================================
       # 步骤 7: 进入内核目录
       # ========================================================================
-      - name: '📁 步骤 7: 进入内核目录'
+      - name: '步骤 7: 进入内核目录'
         shell: bash
         run: |
           cd ${{ env.KERNEL_SRC_DIR }}
@@ -144,7 +148,7 @@ jobs:
       # ========================================================================
       # 步骤 8: 清理编译产物
       # ========================================================================
-      - name: '🧹 步骤 8: 清理编译产物'
+      - name: '步骤 8: 清理编译产物'
         shell: bash
         run: |
           cd ${{ env.KERNEL_SRC_DIR }}
@@ -155,7 +159,7 @@ jobs:
       # ========================================================================
       # 步骤 9: Error 2修复
       # ========================================================================
-      - name: '🔧 步骤 9: Error 2修复'
+      - name: '步骤 9: Error 2修复'
         shell: bash
         run: |
           cd ${{ env.KERNEL_SRC_DIR }}
@@ -176,7 +180,7 @@ jobs:
       # ========================================================================
       # 步骤 10: 注入Phantom调度器
       # ========================================================================
-      - name: '⚡ 步骤 10: 注入Phantom调度器'
+      - name: '步骤 10: 注入Phantom调度器'
         if: ${{ github.event.inputs.enable_phantom || true }}
         shell: bash
         run: |
@@ -191,49 +195,49 @@ jobs:
 #define PHANTOM_X4_CORE_ID 7
 
 struct phantom_scheduler {
-	bool enabled;
-	spinlock_t lock;
+  bool enabled;
+  spinlock_t lock;
 };
 
 static struct phantom_scheduler phantom_sched;
 
 static void phantom_migrate_to_x4(struct task_struct *p)
 {
-	cpumask_t x4_mask;
-	if (!p) return;
-	cpumask_clear(&x4_mask);
-	cpumask_set_cpu(PHANTOM_X4_CORE_ID, &x4_mask);
-	set_cpus_allowed_ptr(p, &x4_mask);
+  cpumask_t x4_mask;
+  if (!p) return;
+  cpumask_clear(&x4_mask);
+  cpumask_set_cpu(PHANTOM_X4_CORE_ID, &x4_mask);
+  set_cpus_allowed_ptr(p, &x4_mask);
 }
 
 static void phantom_boost_priority(struct task_struct *p, u32 boost)
 {
-	int old_prio = p->prio;
-	int new_prio = old_prio - boost;
-	if (new_prio < 110) new_prio = 110;
-	if (new_prio > 130) new_prio = 130;
-	if (new_prio != old_prio) set_user_nice(p, new_prio);
+  int old_prio = p->prio;
+  int new_prio = old_prio - boost;
+  if (new_prio < 110) new_prio = 110;
+  if (new_prio > 130) new_prio = 130;
+  if (new_prio != old_prio) set_user_nice(p, new_prio);
 }
 
 void phantom_schedule_hook(struct task_struct *prev, struct task_struct *next)
 {
-	if (!next) return;
-	const char *comm = next->comm;
-	if (strstr(comm, "render") || strstr(comm, "gpu") || 
-	    strstr(comm, "SurfaceFlinger")) {
-		phantom_migrate_to_x4(next);
-		phantom_boost_priority(next, 10);
-	}
+  if (!next) return;
+  const char *comm = next->comm;
+  if (strstr(comm, "render") || strstr(comm, "gpu") || 
+      strstr(comm, "SurfaceFlinger")) {
+    phantom_migrate_to_x4(next);
+    phantom_boost_priority(next, 10);
+  }
 }
 
 EXPORT_SYMBOL(phantom_schedule_hook);
 
 static int __init phantom_scheduler_init(void)
 {
-	spin_lock_init(&phantom_sched.lock);
-	phantom_sched.enabled = true;
-	pr_info("Phantom Scheduler initialized\n");
-	return 0;
+  spin_lock_init(&phantom_sched.lock);
+  phantom_sched.enabled = true;
+  pr_info("Phantom Scheduler initialized\n");
+  return 0;
 }
 
 module_init(phantom_scheduler_init);
@@ -247,7 +251,7 @@ EOF
       # ========================================================================
       # 步骤 11: GPU频率加固
       # ========================================================================
-      - name: '🎮 步骤 11: GPU频率加固'
+      - name: '步骤 11: GPU频率加固'
         if: ${{ github.event.inputs.enable_gpu_lock || true }}
         shell: bash
         run: |
@@ -262,35 +266,35 @@ EOF
 #define ADRENO_750_MIN_FREQ 267000000
 
 struct gpu_freq_lock {
-	unsigned long locked_freq;
-	bool enabled;
+  unsigned long locked_freq;
+  bool enabled;
 };
 
 static struct gpu_freq_lock gpu_lock;
 
 static int gpu_target(struct device *dev, unsigned long *freq, u32 flags)
 {
-	if (gpu_lock.enabled && *freq < gpu_lock.locked_freq) {
-		*freq = gpu_lock.locked_freq;
-	}
-	return 0;
+  if (gpu_lock.enabled && *freq < gpu_lock.locked_freq) {
+    *freq = gpu_lock.locked_freq;
+  }
+  return 0;
 }
 
 static struct devfreq_dev_profile gpu_profile = {
-	.target = gpu_target,
+  .target = gpu_target,
 };
 
 static int gpu_freq_lock_probe(struct platform_device *pdev)
 {
-	gpu_lock.locked_freq = ADRENO_750_MIN_FREQ;
-	gpu_lock.enabled = true;
-	dev_info(&pdev->dev, "GPU频率锁定: %lu Hz\n", gpu_lock.locked_freq);
-	return 0;
+  gpu_lock.locked_freq = ADRENO_750_MIN_FREQ;
+  gpu_lock.enabled = true;
+  dev_info(&pdev->dev, "GPU频率锁定: %lu Hz\n", gpu_lock.locked_freq);
+  return 0;
 }
 
 static struct platform_driver gpu_freq_lock_driver = {
-	.probe = gpu_freq_lock_probe,
-	.driver = { .name = "gpu-freq-lock" },
+  .probe = gpu_freq_lock_probe,
+  .driver = { .name = "gpu-freq-lock" },
 };
 
 module_platform_driver(gpu_freq_lock_driver);
@@ -300,7 +304,7 @@ GPU_EOF
       # ========================================================================
       # 步骤 12: 存储守护
       # ========================================================================
-      - name: '💾 步骤 12: 存储守护'
+      - name: '步骤 12: 存储守护'
         if: ${{ github.event.inputs.enable_bbg_guard || true }}
         shell: bash
         run: |
@@ -318,30 +322,30 @@ static bool bbg_guard_enabled = true;
 
 static bool is_dangerous_erase(struct request *req)
 {
-	if (!req) return false;
-	if (req_op(req) == REQ_OP_SECURE_ERASE) {
-		pr_warn("BBG Guard: 阻止安全擦除\n");
-		return true;
-	}
-	return false;
+  if (!req) return false;
+  if (req_op(req) == REQ_OP_SECURE_ERASE) {
+    pr_warn("BBG Guard: 阻止安全擦除\n");
+    return true;
+  }
+  return false;
 }
 
 int bbg_guard_prep_req(struct mmc_host *host, struct request *req)
 {
-	if (!bbg_guard_enabled || !req) return 0;
-	if (is_dangerous_erase(req)) {
-		pr_err("BBG Guard: 已阻止危险操作\n");
-		return -EPERM;
-	}
-	return 0;
+  if (!bbg_guard_enabled || !req) return 0;
+  if (is_dangerous_erase(req)) {
+    pr_err("BBG Guard: 已阻止危险操作\n");
+    return -EPERM;
+  }
+  return 0;
 }
 
 EXPORT_SYMBOL(bbg_guard_prep_req);
 
 static int __init bbg_guard_init(void)
 {
-	pr_info("BBG Storage Guard 已加载\n");
-	return 0;
+  pr_info("BBG Storage Guard 已加载\n");
+  return 0;
 }
 
 module_init(bbg_guard_init);
@@ -351,7 +355,7 @@ BBG_EOF
       # ========================================================================
       # 步骤 13: BBRv3网络增强
       # ========================================================================
-      - name: '🌐 步骤 13: BBRv3网络增强'
+      - name: '步骤 13: BBRv3网络增强'
         if: ${{ github.event.inputs.enable_bbrv3 || true }}
         shell: bash
         run: |
@@ -363,50 +367,50 @@ BBG_EOF
 #include <net/tcp.h>
 
 struct bbr {
-	u32 bw;
-	u32 min_rtt;
+  u32 bw;
+  u32 min_rtt;
 };
 
 static void bbr_init(struct sock *sk)
 {
-	struct tcp_sock *tp = tcp_sk(sk);
-	struct bbr *bbr = inet_csk_ca(sk);
-	bbr->bw = 0;
-	bbr->min_rtt = 0x7fffffff;
-	tp->snd_cwnd = 10 * tp->mss_cache;
+  struct tcp_sock *tp = tcp_sk(sk);
+  struct bbr *bbr = inet_csk_ca(sk);
+  bbr->bw = 0;
+  bbr->min_rtt = 0x7fffffff;
+  tp->snd_cwnd = 10 * tp->mss_cache;
 }
 
 static void bbr_cong_avoid(struct sock *sk, u32 ack, u32 acked)
 {
-	struct tcp_sock *tp = tcp_sk(sk);
-	if (tp->snd_cwnd <= tp->snd_ssthresh) {
-		tcp_slow_start(tp, acked);
-	} else {
-		u32 delta = tp->snd_cwnd_cnt + acked;
-		if (delta >= tp->snd_cwnd) {
-			tp->snd_cwnd++;
-			tp->snd_cwnd_cnt = 0;
-		} else {
-			tp->snd_cwnd_cnt = delta;
-		}
-	}
+  struct tcp_sock *tp = tcp_sk(sk);
+  if (tp->snd_cwnd <= tp->snd_ssthresh) {
+    tcp_slow_start(tp, acked);
+  } else {
+    u32 delta = tp->snd_cwnd_cnt + acked;
+    if (delta >= tp->snd_cwnd) {
+      tp->snd_cwnd++;
+      tp->snd_cwnd_cnt = 0;
+    } else {
+      tp->snd_cwnd_cnt = delta;
+    }
+  }
 }
 
 static struct tcp_congestion_ops tcp_bbr_cong_ops = {
-	.init = bbr_init,
-	.cong_avoid = bbr_cong_avoid,
-	.owner = THIS_MODULE,
-	.name = "bbr",
+  .init = bbr_init,
+  .cong_avoid = bbr_cong_avoid,
+  .owner = THIS_MODULE,
+  .name = "bbr",
 };
 
 static int __init bbr_register(void)
 {
-	return tcp_register_congestion_control(&tcp_bbr_cong_ops);
+  return tcp_register_congestion_control(&tcp_bbr_cong_ops);
 }
 
 static void __exit bbr_unregister(void)
 {
-	tcp_unregister_congestion_control(&tcp_bbr_cong_ops);
+  tcp_unregister_congestion_control(&tcp_bbr_cong_ops);
 }
 
 module_init(bbr_register);
@@ -421,7 +425,7 @@ EOF
       # ========================================================================
       # 步骤 14: 配置内核
       # ========================================================================
-      - name: '⚙️ 步骤 14: 配置内核'
+      - name: '步骤 14: 配置内核'
         shell: bash
         run: |
           cd ${{ env.KERNEL_SRC_DIR }}
@@ -443,7 +447,7 @@ EOF
       # ========================================================================
       # 步骤 15: 编译内核
       # ========================================================================
-      - name: '🔨 步骤 15: 编译内核'
+      - name: '步骤 15: 编译内核'
         shell: bash
         run: |
           cd ${{ env.KERNEL_SRC_DIR }}
@@ -456,7 +460,7 @@ EOF
             CC="ccache clang" \
             LD=ld.lld \
             AR=llvm-ar
-            
+          
           if [ -f "arch/${{ env.ARCH }}/boot/Image.gz" ]; then
             echo "✅ 内核编译成功"
             ls -lh "arch/${{ env.ARCH }}/boot/Image.gz"
@@ -468,7 +472,7 @@ EOF
       # ========================================================================
       # 步骤 16: 生成模块
       # ========================================================================
-      - name: '📦 步骤 16: 生成模块'
+      - name: '步骤 16: 生成模块'
         shell: bash
         run: |
           cd ${{ env.KERNEL_SRC_DIR }}
@@ -484,7 +488,7 @@ EOF
       # ========================================================================
       # 步骤 17: 准备AnyKernel3
       # ========================================================================
-      - name: '📁 步骤 17: 准备AnyKernel3'
+      - name: '步骤 17: 准备AnyKernel3'
         shell: bash
         run: |
           cd ${{ env.ANY_KERNEL_DIR }}
@@ -522,7 +526,7 @@ AK_EOF
       # ========================================================================
       # 步骤 18: 创建刷机包
       # ========================================================================
-      - name: '📦 步骤 18: 创建刷机包'
+      - name: '步骤 18: 创建刷机包'
         shell: bash
         run: |
           cd ${{ env.ANY_KERNEL_DIR }}
@@ -538,7 +542,7 @@ AK_EOF
       # ========================================================================
       # 步骤 19: 生成统计
       # ========================================================================
-      - name: '📊 步骤 19: 生成统计'
+      - name: '步骤 19: 生成统计'
         shell: bash
         run: |
           ccache -s
@@ -549,7 +553,7 @@ AK_EOF
       # ========================================================================
       # 步骤 20: 上传产物
       # ========================================================================
-      - name: '📤 步骤 20: 上传产物'
+      - name: '步骤 20: 上传产物'
         uses: actions/upload-artifact@v4
         with:
           name: kernel-build-${{ env.KERNEL_VERSION }}
@@ -561,7 +565,7 @@ AK_EOF
       # ========================================================================
       # 步骤 21: 完成通知
       # ========================================================================
-      - name: '✅ 步骤 21: 完成通知'
+      - name: '步骤 21: 完成通知'
         if: success()
         shell: bash
         run: |
