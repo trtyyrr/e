@@ -12,10 +12,11 @@ jobs:
       KERNEL_BRANCH: android12-5.10
 
     steps:
-      - name: 🚀 1. 部署环境 (包含必要库)
+      - name: 🚀 1. 部署环境 (补全交叉编译工具链)
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y bc build-essential flex bison libssl-dev libelf-dev clang lld llvm python3 curl zip git libncurses-dev
+          # 安装 gcc-aarch64-linux-gnu 以通过内核的编译器校验脚本
+          sudo apt-get install -y bc build-essential flex bison libssl-dev libelf-dev clang lld llvm python3 curl zip git libncurses-dev gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
           echo "BUILD_TIME=$(date +%Y%m%d%H%M)" >> $GITHUB_ENV
 
       - name: 📥 2. 同步源码与工具链
@@ -24,10 +25,10 @@ jobs:
           git clone --depth=1 https://github.com/google/bbr.git -b v3 bbr_v3
           git clone --depth=1 ${{ env.CLANG_REPO }} clang
 
-      - name: 💉 3. 注入 400+ 行深度核心逻辑
+      - name: 💉 3. 注入深度核心逻辑 (400+ 行)
         run: |
           cd kernel
-          # --- [网络: BBRv3 官方逻辑覆盖] ---
+          # --- [网络: BBRv3 覆盖] ---
           cp ../bbr_v3/net/ipv4/tcp_bbr.c net/ipv4/tcp_bbr.c
           cat <<EOF > net/ipv4/phantom_net_ext.c
           #include <linux/tcp.h>
@@ -44,7 +45,7 @@ jobs:
           # --- [调度: Sched Core Hook] ---
           sed -i '/void check_preempt_curr/a \    if (p->comm && (strstr(p->comm, "RenderThread") || strstr(p->comm, "surfaceflinger"))) {\n        if (p->policy != SCHED_FIFO) {\n            struct sched_param param = { .sched_priority = 16 };\n            sched_setscheduler_nocheck(p, SCHED_FIFO, &param);\n        }\n        resched_curr(rq);\n    }' kernel/sched/core.c
 
-          # --- [内存: Creek V 进化逻辑] ---
+          # --- [内存: Creek V 进化] ---
           cat <<EOF > drivers/block/zram/zram_creek_v.c
           #include <linux/zram.h>
           #include "zram_drv.h"
@@ -70,18 +71,19 @@ jobs:
           EOF
           echo "obj-y += phantom/ssg_gov.o" >> drivers/cpufreq/Makefile
 
-          # --- [安全: BBG 防格机系统] ---
+          # --- [安全: BBG 防格机] ---
           sed -i '/mmc_blk_issue_discard_rq/i \    if (strstr(rq->rq_disk->disk_name, "mmcblk0")) { return -EPERM; }' drivers/mmc/core/block.c
 
-      - name: 🏗️ 4. 自动化编译 (修正编译器校验逻辑)
+      - name: 🏗️ 4. 自动化编译 (显式工具链路径)
         run: |
           cd kernel
+          # 核心：获取工具链绝对路径
           CLANG_PATH=$GITHUB_WORKSPACE/clang/bin
           
-          # 定义全量编译器环境变量
-          export MAKE_FLAGS="O=out ARCH=arm64 CC=$CLANG_PATH/clang LD=$CLANG_PATH/ld.lld AR=$CLANG_PATH/llvm-ar NM=$CLANG_PATH/llvm-nm OBJCOPY=$CLANG_PATH/llvm-objcopy OBJDUMP=$CLANG_PATH/llvm-obdump STRIP=$CLANG_PATH/llvm-strip HOSTCC=gcc HOSTCXX=g++ LLVM=1 LLVM_IAS=1"
+          # 构造编译参数：CROSS_COMPILE 必须指向 Clang 内部的 binutils 路径或系统路径
+          export MAKE_FLAGS="O=out ARCH=arm64 CC=$CLANG_PATH/clang LD=$CLANG_PATH/ld.lld AR=$CLANG_PATH/llvm-ar NM=$CLANG_PATH/llvm-nm OBJCOPY=$CLANG_PATH/llvm-objcopy OBJDUMP=$CLANG_PATH/llvm-objdump STRIP=$CLANG_PATH/llvm-strip CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 LLVM_IAS=1 HOSTCC=gcc HOSTCXX=g++"
 
-          # 1. 生成配置 (在这里就要传入 LLVM=1 否则它会去找 gcc)
+          # 1. 生成配置 (使用外部 gcc 辅助校验)
           make $MAKE_FLAGS gki_defconfig
           
           # 2. 动态开启功能宏
@@ -92,26 +94,23 @@ jobs:
             -e CONFIG_ZRAM_CREEK_V \
             -e CONFIG_CPU_FREQ_GOV_SAMSUNG_SSG \
             -e CONFIG_LRU_GEN \
-            -e CONFIG_LTO_CLANG_THIN
+            -d CONFIG_LTO_CLANG_THIN
             
-          # 3. 执行最终编译
+          # 3. 正式编译
           make -j$(nproc --all) $MAKE_FLAGS
 
-      - name: 📦 5. 封装 AnyKernel3
+      - name: 📦 5. 打包 AnyKernel3 并发布
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 ak3
-          # 检查编译出的产物 (Image 或 Image.gz)
-          if [ -f kernel/out/arch/arm64/boot/Image.gz ]; then
-            cp kernel/out/arch/arm64/boot/Image.gz ak3/
-          elif [ -f kernel/out/arch/arm64/boot/Image ]; then
-            cp kernel/out/arch/arm64/boot/Image ak3/
-          fi
-          
+          # 复制生成的 Image 或 Image.gz
+          find kernel/out/arch/arm64/boot/ -name "Image*" -exec cp {} ak3/ \;
           cd ak3
-          zip -r9 ../Phantom-Kernel-${{ env.BUILD_TIME }}.zip * -x .git README.md
-
+          # 移除 git 信息并打包
+          rm -rf .git
+          zip -r9 ../Phantom-Kernel-${{ env.BUILD_TIME }}.zip *
+          
       - name: 📤 6. 发布 Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Phantom-Kernel-Release-${{ env.BUILD_TIME }}
+          name: Phantom-Kernel-Release
           path: Phantom-Kernel-*.zip
