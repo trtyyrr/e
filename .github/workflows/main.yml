@@ -1,15 +1,14 @@
 name: Phantom Kernel Ultimate CI
 on:
-  workflow_dispatch: # 手动触发
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      CC: clang
       ARCH: arm64
-      # 使用稳定且针对 Android 优化的 Clang 仓库
-      CLANG_REPO: https://github.com/kdrag0n/proton-clang 
+      # 使用 Proton Clang 提供更强的优化支持
+      CLANG_REPO: https://github.com/kdrag0n/proton-clang
       KERNEL_SRC: https://android.googlesource.com/kernel/common
       KERNEL_BRANCH: android12-5.10
 
@@ -20,25 +19,23 @@ jobs:
           sudo apt-get install -y bc build-essential flex bison libssl-dev libelf-dev clang lld llvm python3 curl zip git
           echo "BUILD_TIME=$(date +%Y%m%d%H%M)" >> $GITHUB_ENV
 
-      - name: 📥 2. 同步源码 (内核 + 官方 BBRv3 + 工具链)
+      - name: 📥 2. 拉取源码与工具链
         run: |
-          # A. 拉取内核源码 (5.10 分支)
+          # A. 克隆内核 (5.10 分支)
           git clone --depth=1 ${{ env.KERNEL_SRC }} -b ${{ env.KERNEL_BRANCH }} kernel
           
-          # B. 拉取 Google 官方 BBRv3
+          # B. 克隆官方 BBRv3 逻辑
           git clone --depth=1 https://github.com/google/bbr.git -b v3 bbr_v3
           
-          # C. 拉取工具链 (修复之前 tar 报错问题)
+          # C. 克隆 Proton Clang 工具链
           git clone --depth=1 ${{ env.CLANG_REPO }} clang
 
-      - name: 💉 3. 注入 400 行深度逻辑
+      - name: 💉 3. 注入 400 行深度核心逻辑
         run: |
           cd kernel
           
-          # --- [BBRv3 官方逻辑覆盖] ---
+          # --- [网络: 官方 BBRv3 覆盖与扩展] ---
           cp ../bbr_v3/net/ipv4/tcp_bbr.c net/ipv4/tcp_bbr.c
-          
-          # --- [网络堆栈扩展实现] ---
           cat <<EOF > net/ipv4/phantom_net_ext.c
           #include <linux/tcp.h>
           #include <net/tcp.h>
@@ -50,11 +47,10 @@ jobs:
           EOF
           echo "obj-y += phantom_net_ext.o" >> net/ipv4/Makefile
 
-          # --- [跨核调度 Hook 注入] ---
-          # 针对 5.10 源码结构的精确匹配注入
+          # --- [调度: Sched Core Hook] ---
           sed -i '/void check_preempt_curr/a \    if (p->comm && (strstr(p->comm, "RenderThread") || strstr(p->comm, "surfaceflinger"))) {\n        if (p->policy != SCHED_FIFO) {\n            struct sched_param param = { .sched_priority = 16 };\n            sched_setscheduler_nocheck(p, SCHED_FIFO, &param);\n        }\n        resched_curr(rq);\n    }' kernel/sched/core.c
 
-          # --- [内存管理: Creek V 进化] ---
+          # --- [内存: Creek V 进化逻辑] ---
           cat <<EOF > drivers/block/zram/zram_creek_v.c
           #include <linux/zram.h>
           #include "zram_drv.h"
@@ -67,7 +63,7 @@ jobs:
           EOF
           echo "obj-y += zram_creek_v.o" >> drivers/block/zram/Makefile
 
-          # --- [SSG 调速器逻辑] ---
+          # --- [调速: SSG Governor] ---
           mkdir -p drivers/cpufreq/phantom
           cat <<EOF > drivers/cpufreq/phantom/ssg_governor.c
           #include <linux/cpufreq.h>
@@ -80,18 +76,17 @@ jobs:
           EOF
           echo "obj-y += phantom/ssg_gov.o" >> drivers/cpufreq/Makefile
 
-          # --- [BBG 防格机系统] ---
+          # --- [安全: BBG 防格机系统] ---
           sed -i '/mmc_blk_issue_discard_rq/i \    if (strstr(rq->rq_disk->disk_name, "mmcblk0")) { return -EPERM; }' drivers/mmc/core/block.c
 
-      - name: 🏗️ 4. 编译 (ThinLTO 优化)
+      - name: 🏗️ 4. 编译 (修正 Host 工具链冲突)
         run: |
           cd kernel
-          # 设置 Clang 环境变量
-          export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
-          export KBUILD_COMPILER_STRING="$(clang --version | head -n 1)"
+          # 定义工具链路径
+          CLANG_PATH=$GITHUB_WORKSPACE/clang/bin
           
           # 1. 生成基础配置
-          make O=out ARCH=arm64 gki_defconfig
+          make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- gki_defconfig
           
           # 2. 动态开启功能宏
           ./scripts/config --file out/.config \
@@ -99,30 +94,19 @@ jobs:
             -e CONFIG_DEFAULT_BBR \
             -e CONFIG_ZRAM_EXTM \
             -e CONFIG_CPU_FREQ_GOV_SAMSUNG_SSG \
-            -e CONFIG_LTO_CLANG_THIN
+            -e CONFIG_LRU_GEN \
+            -d CONFIG_LTO_CLANG_THIN # 建议初次尝试先禁用 ThinLTO 以防内存溢出
             
-          # 3. 执行编译
+          # 3. 执行编译 (显式传入绝对路径，不修改全局 PATH)
           make -j$(nproc --all) O=out ARCH=arm64 \
-            CC=clang \
-            LD=ld.lld \
-            AR=llvm-ar \
-            NM=llvm-nm \
-            OBJCOPY=llvm-objcopy \
-            OBJDUMP=llvm-objdump \
-            STRIP=llvm-strip \
+            CC=$CLANG_PATH/clang \
+            LD=$CLANG_PATH/ld.lld \
+            AR=$CLANG_PATH/llvm-ar \
+            NM=$CLANG_PATH/llvm-nm \
+            OBJCOPY=$CLANG_PATH/llvm-objcopy \
+            OBJDUMP=$CLANG_PATH/llvm-objdump \
+            STRIP=$CLANG_PATH/llvm-strip \
             CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-
-      - name: 📦 5. 封装 AnyKernel3
-        run: |
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3
-          # 移动 Image.gz 到打包目录
-          [ -f kernel/out/arch/arm64/boot/Image.gz ] && cp kernel/out/arch/arm64/boot/Image.gz AnyKernel3/
-          [ -f kernel/out/arch/arm64/boot/Image ] && cp kernel/out/arch/arm64/boot/Image AnyKernel3/
-          cd AnyKernel3 && zip -r9 ../Phantom-Kernel-${{ env.BUILD_TIME }}.zip *
-
-      - name: 📤 6. 上传
-        uses: actions/upload-artifact@v4
-        with:
-          name: Phantom-Kernel-Release
-          path: Phantom-Kernel-*.zip
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            HOSTCC=gcc \
+            HOSTCXX=g++
