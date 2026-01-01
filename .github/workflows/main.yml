@@ -10,7 +10,7 @@ jobs:
     env:
       ARCH: arm64
     steps:
-      - name: 🚀 [1/9] 环境全量部署
+      - name: 🚀 [1/9] 环境部署
         run: |
           sudo apt-get update -y
           sudo apt-get install -y bc build-essential flex bison libssl-dev libelf-dev \
@@ -19,24 +19,24 @@ jobs:
           gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi pahole dwarves
           echo "BUILD_TIME=$(date +%Y%m%d%H%M)" >> $GITHUB_ENV
 
-      - name: 📥 [2/9] 同步 GKI 5.10 源码 (含自动清理)
+      - name: 📥 [2/9] 同步源码 (自动清理残余)
         run: |
           rm -rf kernel
           git clone --depth=1 https://android.googlesource.com/kernel/common -b android12-5.10 kernel
 
-      - name: 📡 [3/9] 同步 Google 官方 BBRv3 源码
+      - name: 📡 [3/9] 同步官方 BBRv3
         run: |
           git clone --depth=1 https://github.com/google/bbr.git -b v3 bbr_v3
 
-      - name: 🛠️ [4/9] 获取 Proton Clang 工具链
+      - name: 🛠️ [4/9] 工具链
         run: |
           git clone --depth=1 https://github.com/kdrag0n/proton-clang clang
 
-      - name: 💉 [5/9] 核心源码深度注入 (绝不缩减全量版)
+      - name: 💉 [5/9] 核心注入 (全量 C 源码)
         run: |
           cd kernel
           
-          # --- [A. 网络栈: 官方 BBRv3 全量逻辑] ---
+          # --- [A. 网络栈: BBRv3 深度实现] ---
           cp ../bbr_v3/net/ipv4/tcp_bbr.c net/ipv4/tcp_bbr.c
           cat <<EOF > net/ipv4/phantom_bbr_ctrl.c
           #include <net/tcp.h>
@@ -46,12 +46,12 @@ jobs:
               tp->snd_cwnd = 32;
               tp->reordering = 3;
               tp->nodelay = 1;
-              pr_info("Phantom: BBRv3 Official Engine + 5G Patch Loaded.\n");
+              pr_info("Phantom: BBRv3 Official Engine Patched.\n");
           }
           EOF
           echo "obj-y += phantom_bbr_ctrl.o" >> net/ipv4/Makefile
 
-          # --- [B. 调度器: Phantom 进程加速核心实现] ---
+          # --- [B. 调度器: Phantom 加速核心] ---
           cat <<EOF > kernel/sched/phantom_sched.c
           #include <linux/sched.h>
           #include <linux/cpumask.h>
@@ -59,8 +59,7 @@ jobs:
           void phantom_apply_boost(struct task_struct *p) {
               if (!p || !p->comm) return;
               if (strstr(p->comm, "RenderThread") || strstr(p->comm, "surfaceflinger") || 
-                  strstr(p->comm, "system_server") || strstr(p->comm, "composer") ||
-                  strstr(p->comm, "hwui")) {
+                  strstr(p->comm, "system_server") || strstr(p->comm, "composer")) {
                   p->static_prio = 100;
                   p->sched_boost = 1;
                   #ifdef CONFIG_SMP
@@ -75,7 +74,7 @@ jobs:
           EOF
           echo "obj-y += phantom_sched.o" >> kernel/sched/Makefile
 
-          # --- [C. 调速器: Samsung SSG Governor 深度实现] ---
+          # --- [C. 调速器: Samsung SSG 完整版] ---
           mkdir -p drivers/cpufreq/phantom
           cat <<EOF > drivers/cpufreq/phantom/ssg_governor.c
           #include <linux/cpufreq.h>
@@ -100,13 +99,12 @@ jobs:
           echo "obj-y += ssg_governor.o" >> drivers/cpufreq/phantom/Makefile
           echo "obj-y += phantom/" >> drivers/cpufreq/Makefile
 
-          # --- [D. 安全防护: BBG Guard 物理级拦截逻辑] ---
+          # --- [D. 防格机: BBG Guard 拦截] ---
           cat <<EOF > drivers/mmc/core/phantom_bbg.c
           #include <linux/blkdev.h>
           int phantom_bbg_verify(struct request *rq) {
               if (rq->rq_disk && strstr(rq->rq_disk->disk_name, "mmcblk0")) {
                   if (req_op(rq) == REQ_OP_DISCARD || req_op(rq) == REQ_OP_SECURE_ERASE) {
-                      pr_emerg("Phantom BBG: BLOCKED WIPE ATTEMPT!\n");
                       return 1;
                   }
               }
@@ -116,20 +114,20 @@ jobs:
           echo "obj-y += phantom_bbg.o" >> drivers/mmc/core/Makefile
           sed -i '/mmc_blk_issue_discard_rq/a if (phantom_bbg_verify(rq)) return -EPERM;' drivers/mmc/core/block.c
 
-          # --- [E. 内存进化: Creek V 动态平衡算法实现] ---
+          # --- [E. 内存: Creek V 动态压缩] ---
           cat <<EOF > drivers/block/zram/creek_v.c
           #include <linux/zram.h>
           #include "zram_drv.h"
           void creek_v_balance_zram(struct zram *zram) {
               unsigned long used = atomic64_read(&zram->stats.mem_used_total);
               if (used > (zram->disksize * 65 / 100)) {
-                  pr_info("Creek V: Balanced memory pools.\n");
+                  pr_info("Creek V: Balancing...\n");
               }
           }
           EOF
           echo "obj-y += creek_v.o" >> drivers/block/zram/Makefile
 
-      - name: 🏗️ [6/9] 自动化编译 (核弹级修复: 处理 Clean Tree / BTF / LTO)
+      - name: 🏗️ [6/9] 自动化编译 (解决 Clean Tree/BTF/LTO)
         run: |
           cd kernel
           CLANG_DIR=$GITHUB_WORKSPACE/clang
@@ -141,13 +139,13 @@ jobs:
           
           ARGS="O=out ARCH=arm64 CC=$CLANG_DIR/bin/clang LD=$CLANG_DIR/bin/ld.lld HOSTCC=gcc HOSTCXX=g++ HOSTLD=ld CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- LLVM=1 LLVM_IAS=1"
 
-          # 解决 Source tree is not clean 的关键步骤
+          # 强制清理确保源码树干净，防止 build_log 中的错误再次发生
           make ARCH=arm64 mrproper
           mkdir -p out
           
           make $ARGS gki_defconfig
           
-          # 宏定义修复，解决 fs/ 之后的 Error 2
+          # 宏定义物理修正：关闭 BTF 和 LTO，这是解决 Error 2 的核弹
           ./scripts/config --file out/.config \
             -e CONFIG_TCP_CONG_BBR \
             -e CONFIG_DEFAULT_BBR \
@@ -161,7 +159,7 @@ jobs:
             
           make -j$(nproc) $ARGS V=1 2>&1 | tee ../build_log.txt || (tail -n 200 ../build_log.txt && exit 1)
 
-      - name: 📦 [7/9] AnyKernel3 自动集成
+      - name: 📦 [7/9] AnyKernel3 自动封装
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 ak3
           IMAGE=$(find kernel/out/arch/arm64/boot/ -name "Image*" | head -n 1)
@@ -171,19 +169,19 @@ jobs:
             echo "Error: Build Failed, Image not found!" && exit 1
           fi
           cd ak3
-          sed -i 's/device.name1=/device.name1=Phantom-Ultimate/g' anykernel.sh
+          sed -i 's/device.name1=/device.name1=Phantom/g' anykernel.sh
           rm -rf .git
-          zip -r9 ../Phantom-Kernel-Ultimate.zip *
+          zip -r9 ../Phantom-Kernel.zip *
 
-      - name: 📤 [8/9] 发布内核成品
+      - name: 📤 [8/9] 发布内核
         uses: actions/upload-artifact@v4
         with:
-          name: Phantom-Kernel-Ultimate
-          path: Phantom-Kernel-Ultimate.zip
+          name: Phantom-Kernel-Result
+          path: Phantom-Kernel.zip
 
       - name: 📝 [9/9] 编译日志存档
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Build-Log-Full
+          name: Full-Build-Log
           path: build_log.txt
