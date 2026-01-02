@@ -119,11 +119,9 @@ jobs:
           git apply -p1 < ../p_repo/zram_patch/001-lz4.patch || true
           cp ../p_repo/zram_patch/lz4armv8.S lib/ 2>/dev/null || echo "Skip optional ASM"
 
-      - name: 💎 [Step 10] 性能增强：针对 sm8650 L3 缓存预取调优
+      - name: 💎 [Step 10] 性能增强：针对 sm8650 高刷响应调优
         run: |
           cd workspace/common
-          # 注入指令预取逻辑，提升高负载下的指令流吞吐
-          echo "CONFIG_ARCH_MMAP_RND_BITS=24" >> arch/arm64/configs/gki_defconfig
           echo "CONFIG_HZ_1000=y" >> arch/arm64/configs/gki_defconfig
           sed -i 's/CONFIG_HZ=250/CONFIG_HZ=1000/g' arch/arm64/configs/gki_defconfig
 
@@ -148,23 +146,24 @@ jobs:
           key: ccache-sm8650-ultimate-${{ github.sha }}
           restore-keys: ccache-sm8650-ultimate-
 
-      - name: 🧩 [Step 13] 路径物理对齐与环境注入
+      - name: 🧩 [Step 13] 路径物理对齐与环境全量注入
         run: |
           cd workspace/common
-          # 核心修复：手动创建输出目录并预对齐 Defconfig
           mkdir -p out
+          # 核心修复：直接将修改后的 defconfig 赋予 out/.config
           cp arch/arm64/configs/gki_defconfig out/.config
           
-          # 注入编译器路径到全局环境
-          echo "PATH=${{ env.CLANG_ROOT }}/bin:$PATH" >> $GITHUB_ENV
+          # 将编译器绝对路径写入 GITHUB_ENV，确保跨 Step 调用
+          echo "${{ env.CLANG_ROOT }}/bin" >> $GITHUB_PATH
           echo "CCACHE_DIR=${{ env.CCACHE_DIR }}" >> $GITHUB_ENV
 
-      - name: 🏗️ [Step 14] 启动全量自动化编译 (物理路径修正版)
+      - name: 🏗️ [Step 14] 启动全量自动化编译 (交互自适应版)
         run: |
           cd workspace/common
           
-          # 物理导出变量，彻底规避引号错误
+          # 核心修复：通过 export 定义变量，并在 make 命令中显式使用 ARCH=arm64
           export ARCH=arm64
+          export SUBARCH=arm64
           export LLVM=1
           export LLVM_IAS=1
           export CROSS_COMPILE=aarch64-linux-gnu-
@@ -172,12 +171,13 @@ jobs:
           export CLANG_TRIPLE=aarch64-linux-gnu-
           export CC="ccache clang"
           
-          echo "==== 阶段 A: 执行旧配置同步 (olddefconfig) ===="
-          # 不再通过 make O=out gki_defconfig，而是直接对已经拷入的 .config 进行同步
-          make O=out $ARCH olddefconfig
+          echo "==== 阶段 A: 执行旧配置同步 (olddefconfig) 并自动应答新参数 ===="
+          # 使用 yes "" 自动回车处理所有 [N/y/?] (NEW) 问题
+          yes "" | make O=out ARCH=arm64 olddefconfig
           
           echo "==== 阶段 B: 启动内核链接 (j2 并行防止内存溢出) ===="
-          make -j2 O=out $ARCH V=1 2>&1 | tee ../build_log.txt || (tail -n 300 ../build_log.txt && exit 1)
+          # 显式使用 ARCH=arm64 避免 make 误认为目标
+          make -j2 O=out ARCH=arm64 V=1 2>&1 | tee ../build_log.txt || (tail -n 300 ../build_log.txt && exit 1)
 
       - name: 📦 [Step 15] AnyKernel3 自动化刷机包制作
         run: |
@@ -193,7 +193,7 @@ jobs:
           fi
 
       - name: 📤 [Step 16] 发布成品与统计总结
-        uses: actions/upload-artifact@v4
+        uses: upload-artifact@v4
         with:
           name: Phantom-Kernel-Result
           path: |
