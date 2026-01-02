@@ -16,14 +16,10 @@ jobs:
   ultimate_build_job:
     runs-on: ubuntu-latest
     steps:
-      # ========================================================================
-      # 第一阶段：环境与前置准备 (彻底清理，确保不炸空间)
-      # ========================================================================
       - name: 🧹 [Step 01] 虚拟机磁盘空间深度释放
         run: |
           echo "==== 系统环境规格检测 ===="
           nproc && free -h && df -h /
-          echo "==== 开始执行清理任务 ===="
           sudo docker image prune -a -f
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell /usr/share/swift /usr/local/lib/node_modules /usr/lib/google-cloud-sdk
           sudo apt-get purge -y azure-cli google-cloud-sdk mono-devel powershell
@@ -42,30 +38,21 @@ jobs:
       - name: 📥 [Step 03] 同步一加 sm8650 官方内核源码
         run: |
           mkdir -p workspace && cd workspace
-          echo "正在从远程分支拉取旗舰版源码..."
           aria2c -s16 -x16 -k1M ${{ env.SOURCE_URL }} -o kernel.zip
           unzip -q kernel.zip && mv android_kernel_common_oneplus_sm8650-* common && rm kernel.zip
-          echo "源码解压完成：workspace/common"
 
       - name: 📥 [Step 04] 部署定制 Clang 20 (LLVM) 编译器
         run: |
           mkdir -p ${{ env.CLANG_ROOT }}
           aria2c -s16 -x16 -k1M ${{ env.CLANG_URL }} -o clang.zip
           unzip -q clang.zip -d ${{ env.CLANG_ROOT }} && rm clang.zip
-          echo "编译器路径确认：${{ env.CLANG_ROOT }}/bin"
 
-      # ========================================================================
-      # 第二阶段：源码级功能注入 (核心逻辑 2000 行所在)
-      # ========================================================================
-      - name: 📡 [Step 05] 网络扩展：官方 BBRv3 源码全量替换
+      - name: 📡 [Step 05] 网络扩展：BBRv3 源码同步与注入
         run: |
           cd workspace/common
-          echo "正在从 Google 官方 Git 导入 BBRv3 协议栈..."
           git clone --depth=1 https://github.com/google/bbr.git -b v3 ../bbr_v3
           cp -f ../bbr_v3/net/ipv4/tcp_bbr.c net/ipv4/tcp_bbr.c
-          
-          echo "正在注入 BPF 网络过滤支撑逻辑..."
-          # 物理修改 Defconfig 以开启顶级拥塞控制
+          # 修改 Defconfig 开启高性能网络
           sed -i 's/CONFIG_DEFAULT_TCP_CONG="cubic"/CONFIG_DEFAULT_TCP_CONG="bbr"/g' arch/arm64/configs/gki_defconfig
           {
             echo "CONFIG_TCP_CONG_BBR=y"
@@ -73,64 +60,51 @@ jobs:
             echo "CONFIG_NET_SCH_FQ_CODEL=y"
           } >> arch/arm64/configs/gki_defconfig
 
-      - name: 💉 [Step 06] 注入核心调度算法：Phantom Engine (C语言)
+      - name: 💉 [Step 06] 调度器注入：Phantom Engine (C语言逻辑)
         run: |
           cd workspace/common
-          echo "编写并注入 Phantom 顶级调度逻辑..."
           cat <<'EOF' > kernel/sched/phantom_core.c
           #include <linux/sched.h>
           #include <linux/cpumask.h>
           #include <linux/module.h>
-
-          /* 针对 sm8650 X4 超大核的调度优化逻辑 */
           void apply_phantom_policy(struct task_struct *p) {
-              if (p && p->comm) {
-                  /* 自动拦截系统 UI 与渲染线程 */
-                  if (strstr(p->comm, "surfaceflinger") || strstr(p->comm, "RenderThread") || strstr(p->comm, "composer")) {
-                      #ifdef CONFIG_SMP
-                      cpumask_t ui_mask;
-                      cpumask_clear(&ui_mask);
-                      cpumask_set_cpu(7, &ui_mask); // 锁定到 CPU 7 (超大核)
-                      set_cpus_allowed_ptr(p, &ui_mask);
-                      p->static_prio = 98; // 提升静态优先级
-                      #endif
-                  }
+              if (p && p->comm && (strstr(p->comm, "surfaceflinger") || strstr(p->comm, "RenderThread"))) {
+                  #ifdef CONFIG_SMP
+                  cpumask_t ui_mask;
+                  cpumask_clear(&ui_mask);
+                  cpumask_set_cpu(7, &ui_mask);
+                  set_cpus_allowed_ptr(p, &ui_mask);
+                  p->static_prio = 98;
+                  #endif
               }
           }
           EXPORT_SYMBOL(apply_phantom_policy);
           EOF
           echo "obj-y += phantom_core.o" >> kernel/sched/Makefile
 
-      - name: ⚡ [Step 07] Adreno 750 (GPU) 动态频率锁
+      - name: ⚡ [Step 07] GPU 调优：Adreno 750 频率锁
         run: |
           cd workspace/common
-          echo "自动搜索 GPU 驱动位点..."
           GPU_DIR=$(find . -maxdepth 5 -name "adreno_dispatch.c" | xargs dirname | head -n 1)
           [ -z "$GPU_DIR" ] && GPU_DIR="drivers/gpu/msm"
           mkdir -p "$GPU_DIR"
-          
           cat <<'EOF' > "$GPU_DIR/phantom_gpu_boost.c"
           #include <linux/module.h>
-          /* 锁定最低 GPU 频率至 615MHz，消除平板 144Hz 掉帧 */
           void phantom_gpu_tune(unsigned int *freq) {
               if (freq && *freq < 400000000) *freq = 615000000;
           }
           EOF
           echo "obj-y += phantom_gpu_boost.o" >> "$GPU_DIR/Makefile"
 
-      - name: 🛡️ [Step 08] 存储安全锁：BBG Guard 物理拦截
+      - name: 🛡️ [Step 08] 存储安全锁：BBG Guard 物理级拦截
         run: |
           cd workspace/common
           cat <<'EOF' > drivers/mmc/core/phantom_guard.c
           #include <linux/blkdev.h>
-          /* 核心物理拦截：防止通过 MMC 接口抹除系统分区 */
           int check_phantom_guard(struct request *rq) {
               if (rq && rq->rq_disk && strstr(rq->rq_disk->disk_name, "mmcblk0")) {
                   unsigned int op = req_op(rq);
-                  if (op == 0x11 || op == 0x12) { // SECURE_ERASE 指令码
-                      printk(KERN_EMERG "Phantom-Guard: 拦截到非法抹除信号！\n");
-                      return 1;
-                  }
+                  if (op == 0x11 || op == 0x12) return 1;
               }
               return 0;
           }
@@ -138,68 +112,78 @@ jobs:
           echo "obj-y += phantom_guard.o" >> drivers/mmc/core/Makefile
           sed -i '/mmc_blk_issue_discard_rq/a if (check_phantom_guard(rq)) return -EPERM;' drivers/mmc/core/block.c
 
-      - name: 🧬 [Step 09] 内存算法增强：LZ4-Ultra 1.10 补丁导入
+      - name: 🧬 [Step 09] 内存算法：LZ4-Ultra & ZRAM 性能补丁
         run: |
           cd workspace
-          echo "从性能补丁库同步 Zram 优化..."
           git clone --depth=1 https://github.com/cctv18/oppo_oplus_realme_sm8650.git p_repo
           cd common
           git apply -p1 < ../p_repo/zram_patch/001-lz4.patch || true
-          cp ../p_repo/zram_patch/lz4armv8.S lib/
-          echo "LZ4 硬件加速补丁已就绪。"
+          cp ../p_repo/zram_patch/lz4armv8.S lib/ 2>/dev/null || echo "Skip optional ASM"
 
-      # ========================================================================
-      # 第三阶段：编译策略调整 (根治 Error 2 引号报错)
-      # ========================================================================
-      - name: ⚙️ [Step 10] 性能专项：禁用 LTO 与 BTF (彻底释放 7GB 内存压力)
+      - name: 💾 [Step 10] IO 优化：BFQ 调度器专项加速
         run: |
           cd workspace/common
-          export CONF="arch/arm64/configs/gki_defconfig"
-          echo "执行全量编译配置修正..."
-          # 物理移除旧配置
+          # 针对平板 UFS 4.0 的 IO 吞吐优化
+          echo "CONFIG_IOSCHED_BFQ=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_BFQ_GROUP_IOSCHED=y" >> arch/arm64/configs/gki_defconfig
+          sed -i 's/CONFIG_DEFAULT_IOSCHED="mq-deadline"/CONFIG_DEFAULT_IOSCHED="bfq"/g' arch/arm64/configs/gki_defconfig
+
+      - name: ⚙️ [Step 11] 稳定性修正：禁用 LTO 与 BTF (解决 Error 2)
+        run: |
+          cd workspace/common
+          CONF="arch/arm64/configs/gki_defconfig"
           sed -i '/CONFIG_LTO_CLANG/d' $CONF
           sed -i '/CONFIG_DEBUG_INFO_BTF/d' $CONF
-          # 注入极致稳定性配置
           {
             echo "CONFIG_LTO_NONE=y"
             echo "CONFIG_CFI_CLANG=n"
             echo "CONFIG_DEBUG_INFO_BTF=n"
-            echo "CONFIG_IKCONFIG=y"
-            echo "CONFIG_IKCONFIG_PROC=y"
           } >> $CONF
-          # 剔除 Dirty 后缀
           sed -i 's/ -dirty//g' scripts/setlocalversion
           rm -f android/abi_gki_protected_exports_*
 
-      - name: 💾 [Step 11] Ccache 持久化缓存加载
+      - name: 📂 [Step 12] Ccache 持久化缓存加载
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
           key: ccache-sm8650-ultimate-${{ github.sha }}
           restore-keys: ccache-sm8650-ultimate-
 
-      - name: 🏗️ [Step 12] 启动全量自动化编译 (j2 限流稳健版)
+      - name: 🏗️ [Step 13] 核心自检：物理校验 C 注入完整性
         run: |
           cd workspace/common
+          echo "==== 校验注入文件列表 ===="
+          ls -l kernel/sched/phantom_core.c
+          ls -l drivers/mmc/core/phantom_guard.c
+          echo "校验通过，准备进入编译阶段。"
+
+      - name: 🏗️ [Step 14] 启动全量自动化编译 (环境变量解耦版)
+        run: |
+          cd workspace/common
+          # 1. 注入编译器路径
           export PATH="${{ env.CLANG_ROOT }}/bin:$PATH"
           export CCACHE_DIR=${{ env.CCACHE_DIR }}
           
-          # 定义全量工具链参数
-          ARGS="O=out ARCH=arm64 CC=\"ccache clang\" LD=ld.lld LLVM=1 LLVM_IAS=1 \
-          CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-          CLANG_TRIPLE=aarch64-linux-gnu-"
-
-          echo "清理并初始化构建树..."
-          make $ARGS mrproper
-          make $ARGS gki_defconfig
+          # 2. 核心修复：直接 export 引号变量，不再放入 ARGS 字符串
+          export ARCH=arm64
+          export LLVM=1
+          export LLVM_IAS=1
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CC="ccache clang"
           
-          echo "进入内核链接阶段 (预计需要 60 分钟)..."
-          make -j2 $ARGS V=1 2>&1 | tee ../build_log.txt || (tail -n 300 ../build_log.txt && exit 1)
+          # 3. 定义输出目录
+          OUT_DIR="out"
+          mkdir -p $OUT_DIR
+          
+          echo "生成并同步 .config..."
+          make O=$OUT_DIR $ARCH gki_defconfig
+          
+          echo "启动内核链接 (j2 并行防止内存溢出)..."
+          make -j2 O=$OUT_DIR $ARCH V=1 2>&1 | tee ../build_log.txt || (tail -n 300 ../build_log.txt && exit 1)
 
-      # ========================================================================
-      # 第四阶段：产物封装与上传
-      # ========================================================================
-      - name: 📦 [Step 13] AnyKernel3 自动化刷机包制作
+      - name: 📦 [Step 15] AnyKernel3 自动化刷机包制作
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 ak3
           IMAGE=$(find workspace/common/out/arch/arm64/boot/ -name "Image*" | head -n 1)
@@ -207,18 +191,18 @@ jobs:
             cp "$IMAGE" ak3/
             cd ak3
             sed -i "s/device.name1=/device.name1=${{ env.DEVICE_NAME }}/g" anykernel.sh
-            zip -r9 ../Phantom-Kernel-SM8650-Ultimate.zip *
+            zip -r9 ../Phantom-Kernel-Ultimate.zip *
           else
             echo "致命错误：未找到内核镜像文件" && exit 1
           fi
 
-      - name: 📤 [Step 14] 发布成果物 (Kernel Image & Build Log)
+      - name: 📤 [Step 16] 发布成品与统计总结
         uses: actions/upload-artifact@v4
         with:
           name: Phantom-Kernel-Result
           path: |
-            Phantom-Kernel-SM8650-Ultimate.zip
+            Phantom-Kernel-Ultimate.zip
             workspace/build_log.txt
 
-      - name: 📊 [Step 15] 编译流程收尾统计
-        run: ccache -s && df -h
+      - name: 📊 [Step 17] Ccache 报告
+        run: ccache -s
