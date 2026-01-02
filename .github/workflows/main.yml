@@ -119,13 +119,7 @@ jobs:
           git apply -p1 < ../p_repo/zram_patch/001-lz4.patch || true
           cp ../p_repo/zram_patch/lz4armv8.S lib/ 2>/dev/null || echo "Skip optional ASM"
 
-      - name: 💎 [Step 10] 性能增强：针对 sm8650 高刷响应调优
-        run: |
-          cd workspace/common
-          echo "CONFIG_HZ_1000=y" >> arch/arm64/configs/gki_defconfig
-          sed -i 's/CONFIG_HZ=250/CONFIG_HZ=1000/g' arch/arm64/configs/gki_defconfig
-
-      - name: ⚙️ [Step 11] 稳定性修正：禁用 LTO 与 BTF (解决 Error 2)
+      - name: ⚙️ [Step 10] 稳定性修正：禁用 LTO 与 BTF (解决 Error 2)
         run: |
           cd workspace/common
           CONF="arch/arm64/configs/gki_defconfig"
@@ -139,29 +133,28 @@ jobs:
           sed -i 's/ -dirty//g' scripts/setlocalversion
           rm -f android/abi_gki_protected_exports_*
 
-      - name: 📂 [Step 12] Ccache 持久化缓存加载
+      - name: 📂 [Step 11] Ccache 持久化缓存加载
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
           key: ccache-sm8650-ultimate-${{ github.sha }}
           restore-keys: ccache-sm8650-ultimate-
 
-      - name: 🧩 [Step 13] 路径物理对齐与环境全量注入
+      - name: 🧩 [Step 12] 路径物理对齐与 Clang 20 特化环境注入
         run: |
           cd workspace/common
           mkdir -p out
-          # 核心修复：直接将修改后的 defconfig 赋予 out/.config
           cp arch/arm64/configs/gki_defconfig out/.config
           
-          # 将编译器绝对路径写入 GITHUB_ENV，确保跨 Step 调用
+          # 注入编译器绝对路径
           echo "${{ env.CLANG_ROOT }}/bin" >> $GITHUB_PATH
           echo "CCACHE_DIR=${{ env.CCACHE_DIR }}" >> $GITHUB_ENV
 
-      - name: 🏗️ [Step 14] 启动全量自动化编译 (交互自适应版)
+      - name: 🏗️ [Step 13] 执行编译：Clang 20 + Polly + SM8650 特化指令
         run: |
           cd workspace/common
           
-          # 核心修复：通过 export 定义变量，并在 make 命令中显式使用 ARCH=arm64
+          # 核心特化变量
           export ARCH=arm64
           export SUBARCH=arm64
           export LLVM=1
@@ -171,15 +164,18 @@ jobs:
           export CLANG_TRIPLE=aarch64-linux-gnu-
           export CC="ccache clang"
           
-          echo "==== 阶段 A: 执行旧配置同步 (olddefconfig) 并自动应答新参数 ===="
-          # 使用 yes "" 自动回车处理所有 [N/y/?] (NEW) 问题
+          # 加入 Polly 优化标志及针对 Cortex-X4 (sm8650) 的指令集优化
+          # -mllvm -polly: 开启多面体循环优化
+          # -march=armv9.2-a: 启用 Armv9.2 特性
+          export KCFLAGS="-march=armv9.2-a+crypto+fp16+dotprod -mllvm -polly -mllvm -polly-ast-detect-unprofitable -mllvm -polly-run-inliner"
+          
+          echo "==== 阶段 A: 执行旧配置同步 (olddefconfig) ===="
           yes "" | make O=out ARCH=arm64 olddefconfig
           
-          echo "==== 阶段 B: 启动内核链接 (j2 并行防止内存溢出) ===="
-          # 显式使用 ARCH=arm64 避免 make 误认为目标
+          echo "==== 阶段 B: 启动全量链接 (j2 模式) ===="
           make -j2 O=out ARCH=arm64 V=1 2>&1 | tee ../build_log.txt || (tail -n 300 ../build_log.txt && exit 1)
 
-      - name: 📦 [Step 15] AnyKernel3 自动化刷机包制作
+      - name: 📦 [Step 14] AnyKernel3 自动化刷机包制作
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 ak3
           IMAGE=$(find workspace/common/out/arch/arm64/boot/ -name "Image*" | head -n 1)
@@ -192,13 +188,13 @@ jobs:
             echo "致命错误：未找到内核镜像文件" && exit 1
           fi
 
-      - name: 📤 [Step 16] 发布成品与统计总结
-        uses: upload-artifact@v4
+      - name: 📤 [Step 15] 发布成品 (修正 Actions 组织名错误)
+        uses: actions/upload-artifact@v4
         with:
           name: Phantom-Kernel-Result
           path: |
             Phantom-Kernel-Ultimate.zip
             workspace/build_log.txt
 
-      - name: 📊 [Step 17] Ccache 报告
+      - name: 📊 [Step 16] Ccache 构建统计总结
         run: ccache -s
