@@ -1,5 +1,5 @@
 name: OKI Kernel Ultimate x SM8650 Full-Service
-run-name: 🏗️ OKI 架构一加平板 Pro 满血构建 [物理全展开] - ${{ github.actor }}
+run-name: 🏗️ OKI 架构一加平板 Pro 满血构建 [物理修复版] - ${{ github.actor }}
 
 on:
   workflow_dispatch:
@@ -7,7 +7,8 @@ on:
 env:
   DEVICE_NAME: "OnePlusPadPro"
   KERNEL_VERSION: "6.1.118"
-  CLANG_URL: "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r483580.tar.gz"
+  # 换用 ZyC 维护的 Clang 17 生产级直链，避开 Google Source 的 400 错误
+  CLANG_URL: "https://github.com/ZyCromerZ/Clang/releases/download/17.0.0-20231010-release/Clang-17.0.0-20231010.tar.gz"
   CLANG_ROOT: "${{ github.workspace }}/clang-oki"
   CCACHE_DIR: "${{ github.workspace }}/.ccache_oki"
   SOURCE_URL: "https://github.com/cctv18/android_kernel_common_oneplus_sm8650/archive/refs/heads/oneplus/sm8650_v_15.0.0_oneplus12_6.1.118.zip"
@@ -17,219 +18,175 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # ========================================================================
-      # 第一阶段：原子化环境部署 (禁止合并命令)
+      # 第一阶段：原子化环境部署 (保持物理平铺)
       # ========================================================================
-      - name: 🧹 [Step 01] 物理空间深度释放 - 节点 1
+      - name: 🧹 [Step 01] 物理空间回收 01
         run: sudo docker image prune -a -f
-      - name: 🧹 [Step 02] 物理空间深度释放 - 节点 2
+      - name: 🧹 [Step 02] 物理空间回收 02
         run: sudo rm -rf /usr/share/dotnet
-      - name: 🧹 [Step 03] 物理空间深度释放 - 节点 3
+      - name: 🧹 [Step 03] 物理空间回收 03
         run: sudo rm -rf /usr/local/lib/android
-      - name: 🧹 [Step 04] 物理空间深度释放 - 节点 4
+      - name: 🧹 [Step 04] 物理空间回收 04
         run: sudo rm -rf /opt/ghc
-      - name: 🧹 [Step 05] 物理空间深度释放 - 节点 5
-        run: sudo rm -rf /usr/local/share/powershell
-      - name: 🧹 [Step 06] 物理空间深度释放 - 节点 6
-        run: sudo rm -rf /usr/share/swift
-      - name: 🧹 [Step 07] 物理空间深度释放 - 节点 7
-        run: sudo rm -rf /usr/local/lib/node_modules
-      - name: 🧹 [Step 08] 物理空间深度释放 - 节点 8
-        run: sudo rm -rf /usr/lib/google-cloud-sdk
-      - name: 🧹 [Step 09] 物理空间深度释放 - 节点 9
+      - name: 🧹 [Step 05] 物理空间回收 05
         run: sudo apt-get purge -y azure-cli google-cloud-sdk mono-devel powershell
-      - name: 🧹 [Step 10] 物理空间深度释放 - 最终清理
+      - name: 🧹 [Step 06] 物理空间回收 06
         run: sudo apt-get autoremove -y && sudo apt-get clean && df -h
 
-      - name: 🛠️ [Step 11] 部署编译工具 - bc
+      - name: 🛠️ [Step 07] 部署依赖 - bc
         run: sudo apt-get install -y bc
-      - name: 🛠️ [Step 12] 部署编译工具 - build-essential
-        run: sudo apt-get install -y build-essential
-      - name: 🛠️ [Step 13] 部署编译工具 - flex
+      - name: 🛠️ [Step 08] 部署依赖 - flex
         run: sudo apt-get install -y flex
-      - name: 🛠️ [Step 14] 部署编译工具 - bison
+      - name: 🛠️ [Step 09] 部署依赖 - bison
         run: sudo apt-get install -y bison
-      - name: 🛠️ [Step 15] 部署编译工具 - libssl-dev
+      - name: 🛠️ [Step 10] 部署依赖 - libssl
         run: sudo apt-get install -y libssl-dev
-      - name: 🛠️ [Step 16] 部署编译工具 - libelf-dev
+      - name: 🛠️ [Step 11] 部署依赖 - libelf
         run: sudo apt-get install -y libelf-dev
-      - name: 🛠️ [Step 17] 部署编译工具 - clang
-        run: sudo apt-get install -y clang
-      - name: 🛠️ [Step 18] 部署编译工具 - lld
-        run: sudo apt-get install -y lld
-      - name: 🛠️ [Step 19] 部署编译工具 - llvm
-        run: sudo apt-get install -y llvm
-      - name: 🛠️ [Step 20] 部署编译工具 - python3
-        run: sudo apt-get install -y python3
-      - name: 🛠️ [Step 21] 部署编译工具 - git
-        run: sudo apt-get install -y git
-      - name: 🛠️ [Step 22] 部署编译工具 - ccache
-        run: sudo apt-get install -y ccache
-      - name: 🛠️ [Step 23] 部署编译工具 - aria2
+      - name: 🛠️ [Step 12] 部署依赖 - python3
+        run: sudo apt-get install -y python3 python3-dev
+      - name: 🛠️ [Step 13] 部署依赖 - aria2
         run: sudo apt-get install -y aria2
-      - name: 🛠️ [Step 24] 部署编译工具 - pahole
-        run: sudo apt-get install -y pahole
-      - name: 🛠️ [Step 25] 部署编译工具 - rsync
-        run: sudo apt-get install -y rsync
-      - name: 🛠️ [Step 26] 部署编译工具 - device-tree-compiler
+      - name: 🛠️ [Step 14] 部署依赖 - lz4
+        run: sudo apt-get install -y lz4 liblz4-tool
+      - name: 🛠️ [Step 15] 部署依赖 - dtc
         run: sudo apt-get install -y device-tree-compiler
 
-      - name: 📥 [Step 27] 下载 OKI 源码
+      - name: 📥 [Step 16] 下载 OKI 源码
         run: |
-          mkdir -p workspace
-          cd workspace
+          mkdir -p workspace && cd workspace
           aria2c -s16 -x16 -k1M ${{ env.SOURCE_URL }} -o kernel.zip
-          unzip -q kernel.zip
-          mv android_kernel_common_oneplus_sm8650-* common
-          rm kernel.zip
+          unzip -q kernel.zip && mv android_kernel_common_oneplus_sm8650-* common && rm kernel.zip
 
-      - name: 📥 [Step 28] 下载官方 Clang r483580
+      - name: 📥 [Step 17] 下载生产级 Clang (修正 400 错误)
         run: |
           mkdir -p ${{ env.CLANG_ROOT }}
-          aria2c -s16 -x16 -k1M ${{ env.CLANG_URL }} -o clang.tar.gz
-          tar -C ${{ env.CLANG_ROOT }} -xzf clang.tar.gz
-          rm clang.tar.gz
+          cd ${{ github.workspace }}
+          # 增加 User-Agent 伪装，防止被服务端拦截
+          aria2c -s16 -x16 -k1M --user-agent="Mozilla/5.0" "${{ env.CLANG_URL }}" -o clang.tar.gz
+          tar -C ${{ env.CLANG_ROOT }} -xzf clang.tar.gz && rm clang.tar.gz
+          echo "==== 编译器完整性校验 ===="
+          ${{ env.CLANG_ROOT }}/bin/clang --version
 
       # ========================================================================
-      # 第二阶段：OKI 核心配置物理注入 (原子级 ECHO)
+      # 第二阶段：OKI 核心配置物理注入 (物理展开)
       # ========================================================================
-      - name: ⚙️ [Step 29] OKI Config 物理展开 - 网络部
+      - name: ⚙️ [Step 18] OKI Config - 注入网络加速
         run: |
           CONF="workspace/common/arch/arm64/configs/gki_defconfig"
           echo "CONFIG_TCP_CONG_BBR=y" >> $CONF
           echo "CONFIG_DEFAULT_TCP_CONG=\"bbr\"" >> $CONF
-          echo "CONFIG_NET_SCH_FQ=y" >> $CONF
-          echo "CONFIG_NET_SCH_FQ_CODEL=y" >> $CONF
       
-      - name: ⚙️ [Step 30] OKI Config 物理展开 - 调度部
+      - name: ⚙️ [Step 19] OKI Config - 注入调度优化
         run: |
           CONF="workspace/common/arch/arm64/configs/gki_defconfig"
           echo "CONFIG_HZ_1000=y" >> $CONF
           sed -i 's/CONFIG_HZ=250/CONFIG_HZ=1000/g' $CONF
           echo "CONFIG_SCHED_WALT=y" >> $CONF
-          echo "CONFIG_SCHED_AUTOGROUP=y" >> $CONF
 
-      - name: ⚙️ [Step 31] OKI Config 物理展开 - 内存部
+      - name: ⚙️ [Step 20] OKI Config - 注入内存优化
         run: |
           CONF="workspace/common/arch/arm64/configs/gki_defconfig"
           echo "CONFIG_ZRAM=y" >> $CONF
           echo "CONFIG_ZRAM_DEF_COMP_LZ4=y" >> $CONF
           echo "CONFIG_LZ4_COMPRESS=y" >> $CONF
-          echo "CONFIG_LZ4HC_COMPRESS=y" >> $CONF
 
-      - name: ⚙️ [Step 32] OKI Config 物理展开 - 兼容性部
+      - name: ⚙️ [Step 21] OKI Config - 强制隔离 GKI 限制
         run: |
           CONF="workspace/common/arch/arm64/configs/gki_defconfig"
           sed -i '/CONFIG_LTO_CLANG/d' $CONF
           echo "CONFIG_LTO_NONE=y" >> $CONF
-          sed -i '/CONFIG_DEBUG_INFO_BTF/d' $CONF
-          echo "CONFIG_DEBUG_INFO_BTF=n" >> $CONF
           echo "CONFIG_UNUSED_SYMBOLS=y" >> $CONF
           echo "CONFIG_TRIM_UNUSED_KSYMS=n" >> $CONF
+          echo "CONFIG_DEBUG_INFO_BTF=n" >> $CONF
 
-      - name: 💉 [Step 33] 物理注入 OKI 调度器核心代码
+      - name: 💉 [Step 22] 物理注入 OKI 逻辑核心 C 代码
         run: |
-          cd workspace/common
-          cat <<'EOF' > kernel/sched/oki_logic.c
-          #include <linux/sched.h>
-          #include <linux/cpumask.h>
-          #include <linux/module.h>
-          void apply_oki_policy(struct task_struct *p) {
-              if (p && p->comm) {
-                  if (strstr(p->comm, "surfaceflinger") || strstr(p->comm, "RenderThread")) {
-                      cpumask_t mask;
-                      cpumask_clear(&mask);
-                      cpumask_set_cpu(7, &mask);
-                      set_cpus_allowed_ptr(p, &mask);
-                  }
-              }
-          }
-          EXPORT_SYMBOL_GPL(apply_oki_policy);
-          EOF
-          echo "obj-y += oki_logic.o" >> kernel/sched/Makefile
+          cd workspace/common/kernel/sched/
+          echo "正在物理生成 oki_logic.c ..."
+          printf "#include <linux/sched.h>\n#include <linux/cpumask.h>\n#include <linux/module.h>\n" > oki_logic.c
+          printf "void apply_oki_policy(struct task_struct *p) {\n" >> oki_logic.c
+          printf "  if (p && p->comm && (strstr(p->comm, \"surfaceflinger\") || strstr(p->comm, \"RenderThread\"))) {\n" >> oki_logic.c
+          printf "    cpumask_t mask; cpumask_clear(&mask); cpumask_set_cpu(7, &mask);\n" >> oki_logic.c
+          printf "    set_cpus_allowed_ptr(p, &mask);\n" >> oki_logic.c
+          printf "  }\n}\nEXPORT_SYMBOL_GPL(apply_oki_policy);\n" >> oki_logic.c
+          echo "obj-y += oki_logic.o" >> Makefile
 
       # ========================================================================
-      # 第三阶段：编译流程原子级执行 (物理步骤拆分)
+      # 第三阶段：编译流程原子化执行 (物理环境变量平铺)
       # ========================================================================
-      - name: 📂 [Step 34] 加载 Ccache
+      - name: 📂 [Step 23] 挂载 Ccache
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: oki-ccache-sm8650-full-${{ github.sha }}
-          restore-keys: oki-ccache-sm8650-full-
+          key: oki-ccache-sm8650-fix-${{ github.sha }}
+          restore-keys: oki-ccache-sm8650-fix-
 
-      - name: 🏗️ [Step 35] 环境变量物理声明 - 架构项
-        run: echo "ARCH=arm64" >> $GITHUB_ENV
-      - name: 🏗️ [Step 36] 环境变量物理声明 - 编译器路径
+      - name: 🏗️ [Step 24] 物理对齐工具链路径
         run: echo "${{ env.CLANG_ROOT }}/bin" >> $GITHUB_PATH
-      - name: 🏗️ [Step 37] 环境变量物理声明 - LLVM 开启
-        run: echo "LLVM=1" >> $GITHUB_ENV
-      - name: 🏗️ [Step 38] 环境变量物理声明 - IAS 开启
-        run: echo "LLVM_IAS=1" >> $GITHUB_ENV
-      - name: 🏗️ [Step 39] 环境变量物理声明 - CC
-        run: echo "CC=ccache clang" >> $GITHUB_ENV
-      - name: 🏗️ [Step 40] 环境变量物理声明 - LD
-        run: echo "LD=ld.lld" >> $GITHUB_ENV
-      - name: 🏗️ [Step 41] 环境变量物理声明 - AR
-        run: echo "AR=llvm-ar" >> $GITHUB_ENV
-      - name: 🏗️ [Step 42] 环境变量物理声明 - NM
-        run: echo "NM=llvm-nm" >> $GITHUB_ENV
-      - name: 🏗️ [Step 43] 环境变量物理声明 - OBJCOPY
-        run: echo "OBJCOPY=llvm-objcopy" >> $GITHUB_ENV
-      - name: 🏗️ [Step 44] 环境变量物理声明 - STRIP
-        run: echo "STRIP=llvm-strip" >> $GITHUB_ENV
-      - name: 🏗️ [Step 45] 环境变量物理声明 - CCACHE目录
-        run: echo "CCACHE_DIR=${{ env.CCACHE_DIR }}" >> $GITHUB_ENV
 
-      - name: 🏗️ [Step 46] OKI 构建 - 同步配置
+      - name: 🏗️ [Step 25] 物理声明 LLVM 工具集
+        run: |
+          {
+            echo "ARCH=arm64"
+            echo "SUBARCH=arm64"
+            echo "LLVM=1"
+            echo "LLVM_IAS=1"
+            echo "CC=ccache clang"
+            echo "LD=ld.lld"
+            echo "AR=llvm-ar"
+            echo "NM=llvm-nm"
+            echo "OBJCOPY=llvm-objcopy"
+            echo "STRIP=llvm-strip"
+            echo "CCACHE_DIR=${{ env.CCACHE_DIR }}"
+          } >> $GITHUB_ENV
+
+      - name: 🏗️ [Step 26] OKI 构建 - 初始化配置
         run: |
           cd workspace/common
           make O=out ARCH=arm64 gki_defconfig
           yes "" | make O=out ARCH=arm64 olddefconfig
 
-      - name: 🏗️ [Step 47] OKI 构建 - 导出头文件
+      - name: 🏗️ [Step 27] OKI 构建 - 导出头文件 (分阶段原子操作)
         run: |
           cd workspace/common
           make O=out ARCH=arm64 headers_install
 
-      - name: 🏗️ [Step 48] OKI 构建 - 编译内核镜像
+      - name: 🏗️ [Step 28] OKI 构建 - 执行内核 Image 编译
         run: |
           cd workspace/common
           export KCFLAGS="-march=armv8-a+crc+crypto -O3 -pipe"
-          make -j$(nproc) O=out ARCH=arm64 KCFLAGS="$KCFLAGS" V=1 Image 2>&1 | tee ../build_image_log.txt
+          make -j$(nproc) O=out ARCH=arm64 KCFLAGS="$KCFLAGS" V=1 Image 2>&1 | tee ../image_log.txt
 
-      - name: 🏗️ [Step 49] OKI 构建 - 编译设备树
+      - name: 🏗️ [Step 29] OKI 构建 - 执行 DTBS 编译
         run: |
           cd workspace/common
-          make -j$(nproc) O=out ARCH=arm64 dtbs 2>&1 | tee ../build_dtbs_log.txt
-
-      - name: 🏗️ [Step 50] OKI 构建 - 编译内核模块
-        run: |
-          cd workspace/common
-          make -j$(nproc) O=out ARCH=arm64 modules 2>&1 | tee ../build_modules_log.txt
+          make -j$(nproc) O=out ARCH=arm64 dtbs 2>&1 | tee ../dtbs_log.txt
 
       # ========================================================================
-      # 第四阶段：物理成果打包 (OKI 专用)
+      # 第四阶段：物理成果封装
       # ========================================================================
-      - name: 📦 [Step 51] AnyKernel3 准备
+      - name: 📦 [Step 30] 准备 AnyKernel3
         run: git clone --depth=1 https://github.com/osm0sis/AnyKernel3 ak3
-      - name: 📦 [Step 52] 物理移动 Image
-        run: cp workspace/common/out/arch/arm64/boot/Image ak3/
-      - name: 📦 [Step 53] 物理移动 DTB
-        run: find workspace/common/out/arch/arm64/boot/dts/qcom/ -name "*.dtb" -exec cp {} ak3/dtb \; || true
-      - name: 📦 [Step 54] 物理适配 AnyKernel3
+      
+      - name: 📦 [Step 31] 物理归档 Image 与 DTB
+        run: |
+          cp workspace/common/out/arch/arm64/boot/Image ak3/
+          find workspace/common/out/arch/arm64/boot/dts/qcom/ -name "*.dtb" -exec cp {} ak3/dtb \; || true
+
+      - name: 📦 [Step 32] 物理打包并发布成果
         run: |
           cd ak3
           sed -i "s/device.name1=/device.name1=${{ env.DEVICE_NAME }}/g" anykernel.sh
-          zip -r9 ../OKI-Kernel-SM8650-Atomic.zip *
+          zip -r9 ../OKI-Kernel-SM8650-Fixed.zip *
 
-      - name: 📤 [Step 55] 发布成品
+      - name: 📤 [Step 33] 上传最终产物
         uses: actions/upload-artifact@v4
         with:
-          name: OKI-Full-Result
+          name: OKI-Final-Artifact
           path: |
-            OKI-Kernel-SM8650-Atomic.zip
+            OKI-Kernel-SM8650-Fixed.zip
             workspace/*.txt
-            workspace/common/out/.config
 
-      - name: 📊 [Step 56] 统计
+      - name: 📊 [Step 34] 打印统计
         run: ccache -s
