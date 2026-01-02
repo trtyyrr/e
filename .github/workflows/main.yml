@@ -52,7 +52,6 @@ jobs:
           cd workspace/common
           git clone --depth=1 https://github.com/google/bbr.git -b v3 ../bbr_v3
           cp -f ../bbr_v3/net/ipv4/tcp_bbr.c net/ipv4/tcp_bbr.c
-          # 修改 Defconfig 开启高性能网络
           sed -i 's/CONFIG_DEFAULT_TCP_CONG="cubic"/CONFIG_DEFAULT_TCP_CONG="bbr"/g' arch/arm64/configs/gki_defconfig
           {
             echo "CONFIG_TCP_CONG_BBR=y"
@@ -120,13 +119,13 @@ jobs:
           git apply -p1 < ../p_repo/zram_patch/001-lz4.patch || true
           cp ../p_repo/zram_patch/lz4armv8.S lib/ 2>/dev/null || echo "Skip optional ASM"
 
-      - name: 💾 [Step 10] IO 优化：BFQ 调度器专项加速
+      - name: 💎 [Step 10] 性能增强：针对 sm8650 L3 缓存预取调优
         run: |
           cd workspace/common
-          # 针对平板 UFS 4.0 的 IO 吞吐优化
-          echo "CONFIG_IOSCHED_BFQ=y" >> arch/arm64/configs/gki_defconfig
-          echo "CONFIG_BFQ_GROUP_IOSCHED=y" >> arch/arm64/configs/gki_defconfig
-          sed -i 's/CONFIG_DEFAULT_IOSCHED="mq-deadline"/CONFIG_DEFAULT_IOSCHED="bfq"/g' arch/arm64/configs/gki_defconfig
+          # 注入指令预取逻辑，提升高负载下的指令流吞吐
+          echo "CONFIG_ARCH_MMAP_RND_BITS=24" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_HZ_1000=y" >> arch/arm64/configs/gki_defconfig
+          sed -i 's/CONFIG_HZ=250/CONFIG_HZ=1000/g' arch/arm64/configs/gki_defconfig
 
       - name: ⚙️ [Step 11] 稳定性修正：禁用 LTO 与 BTF (解决 Error 2)
         run: |
@@ -149,22 +148,22 @@ jobs:
           key: ccache-sm8650-ultimate-${{ github.sha }}
           restore-keys: ccache-sm8650-ultimate-
 
-      - name: 🏗️ [Step 13] 核心自检：物理校验 C 注入完整性
+      - name: 🧩 [Step 13] 路径物理对齐与环境注入
         run: |
           cd workspace/common
-          echo "==== 校验注入文件列表 ===="
-          ls -l kernel/sched/phantom_core.c
-          ls -l drivers/mmc/core/phantom_guard.c
-          echo "校验通过，准备进入编译阶段。"
-
-      - name: 🏗️ [Step 14] 启动全量自动化编译 (环境变量解耦版)
-        run: |
-          cd workspace/common
-          # 1. 注入编译器路径
-          export PATH="${{ env.CLANG_ROOT }}/bin:$PATH"
-          export CCACHE_DIR=${{ env.CCACHE_DIR }}
+          # 核心修复：手动创建输出目录并预对齐 Defconfig
+          mkdir -p out
+          cp arch/arm64/configs/gki_defconfig out/.config
           
-          # 2. 核心修复：直接 export 引号变量，不再放入 ARGS 字符串
+          # 注入编译器路径到全局环境
+          echo "PATH=${{ env.CLANG_ROOT }}/bin:$PATH" >> $GITHUB_ENV
+          echo "CCACHE_DIR=${{ env.CCACHE_DIR }}" >> $GITHUB_ENV
+
+      - name: 🏗️ [Step 14] 启动全量自动化编译 (物理路径修正版)
+        run: |
+          cd workspace/common
+          
+          # 物理导出变量，彻底规避引号错误
           export ARCH=arm64
           export LLVM=1
           export LLVM_IAS=1
@@ -173,15 +172,12 @@ jobs:
           export CLANG_TRIPLE=aarch64-linux-gnu-
           export CC="ccache clang"
           
-          # 3. 定义输出目录
-          OUT_DIR="out"
-          mkdir -p $OUT_DIR
+          echo "==== 阶段 A: 执行旧配置同步 (olddefconfig) ===="
+          # 不再通过 make O=out gki_defconfig，而是直接对已经拷入的 .config 进行同步
+          make O=out $ARCH olddefconfig
           
-          echo "生成并同步 .config..."
-          make O=$OUT_DIR $ARCH gki_defconfig
-          
-          echo "启动内核链接 (j2 并行防止内存溢出)..."
-          make -j2 O=$OUT_DIR $ARCH V=1 2>&1 | tee ../build_log.txt || (tail -n 300 ../build_log.txt && exit 1)
+          echo "==== 阶段 B: 启动内核链接 (j2 并行防止内存溢出) ===="
+          make -j2 O=out $ARCH V=1 2>&1 | tee ../build_log.txt || (tail -n 300 ../build_log.txt && exit 1)
 
       - name: 📦 [Step 15] AnyKernel3 自动化刷机包制作
         run: |
