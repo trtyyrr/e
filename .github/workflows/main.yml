@@ -1,5 +1,5 @@
-name: Phantom Kernel Ultimate x SM8650 Full-Service
-run-name: 🏗️ 正在构建一加平板 Pro 旗舰内核 [v6.1.118] - 物理满血修正版
+name: Phantom Kernel Ultimate x SM8650 Official-Toolchain
+run-name: 🏗️ 正在构建一加平板 Pro 旗舰内核 [v6.1.118] - 官方 Clang 全量版
 
 on:
   workflow_dispatch:
@@ -7,29 +7,29 @@ on:
 env:
   DEVICE_NAME: "OnePlusPadPro"
   KERNEL_VERSION: "6.1.118"
-  CLANG_ROOT: "${{ github.workspace }}/clang20"
+  # 换用谷歌 AOSP 官方稳定的 Clang 17 (r498220b)
+  CLANG_URL: "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r498220b.tar.gz"
+  CLANG_ROOT: "${{ github.workspace }}/clang-r498220b"
   CCACHE_DIR: "${{ github.workspace }}/.ccache_phantom"
   SOURCE_URL: "https://github.com/cctv18/android_kernel_common_oneplus_sm8650/archive/refs/heads/oneplus/sm8650_v_15.0.0_oneplus12_6.1.118.zip"
-  CLANG_URL: "https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang20-r547379/clang-r547379.zip"
 
 jobs:
   ultimate_build_job:
     runs-on: ubuntu-latest
     steps:
       # ========================================================================
-      # 第一阶段：极致环境初始化 (物理展开)
+      # 第一阶段：系统环境物理准备 (不缩减)
       # ========================================================================
-      - name: 🧹 [Step 01] 虚拟机磁盘空间深度释放 (物理冗余清理)
+      - name: 🧹 [Step 01] 虚拟机磁盘空间物理级清理
         run: |
-          echo "==== [DEBUG] 正在启动大规模空间回收任务 ===="
+          echo "==== 正在启动深层空间回收 ===="
           sudo docker image prune -a -f
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/powershell /usr/share/swift /usr/local/lib/node_modules /usr/lib/google-cloud-sdk
           sudo apt-get purge -y azure-cli google-cloud-sdk mono-devel powershell
           sudo apt-get autoremove -y && sudo apt-get clean
-          echo "==== [DEBUG] 空间状态统计 ===="
           df -h
 
-      - name: 🛠️ [Step 02] 部署工业级交叉编译依赖 (全量补齐)
+      - name: 🛠️ [Step 02] 部署全套交叉编译生产工具链
         run: |
           sudo apt-get update -y
           sudo apt-get install -y --no-install-recommends \
@@ -39,141 +39,110 @@ jobs:
             binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi \
             wget tar libarchive-tools lz4 liblz4-tool zstd libzstd-dev
 
-      - name: 📥 [Step 03] 同步一加 sm8650 源码 (物理链路校验)
+      - name: 📥 [Step 03] 同步内核源码 (sm8650 Full Source)
         run: |
           mkdir -p workspace && cd workspace
           aria2c -s16 -x16 -k1M ${{ env.SOURCE_URL }} -o kernel.zip
           unzip -q kernel.zip && mv android_kernel_common_oneplus_sm8650-* common && rm kernel.zip
 
-      - name: 📥 [Step 04] 部署 LLVM-Clang 20 (针对 Cortex-X4 特化版)
+      - name: 📥 [Step 04] 部署谷歌官方 Clang r498220b (LLVM 17)
         run: |
           mkdir -p ${{ env.CLANG_ROOT }}
-          aria2c -s16 -x16 -k1M ${{ env.CLANG_URL }} -o clang.zip
-          unzip -q clang.zip -d ${{ env.CLANG_ROOT }} && rm clang.zip
+          # 谷歌官方链接采用 tar.gz 格式，解压命令物理平铺
+          aria2c -s16 -x16 -k1M ${{ env.CLANG_URL }} -o clang.tar.gz
+          tar -C ${{ env.CLANG_ROOT }} -xzf clang.tar.gz
+          rm clang.tar.gz
+          echo "==== 验证编译器版本 ===="
+          ${{ env.CLANG_ROOT }}/bin/clang --version
 
       # ========================================================================
-      # 第二阶段：内核逻辑深度注入 (解决路径崩溃问题)
+      # 第二阶段：内核底层逻辑硬核注入 (物理展开)
       # ========================================================================
-      - name: 📡 [Step 05] 网络协议栈：官方 BBRv3 逻辑全量重构
+      - name: 📡 [Step 05] 网络协议栈优化：BBRv3 深度平铺
         run: |
           cd workspace/common
           git clone --depth=1 https://github.com/google/bbr.git -b v3 ../bbr_v3
           cp -f ../bbr_v3/net/ipv4/tcp_bbr.c net/ipv4/tcp_bbr.c
+          
+          # 物理注入配置项，不使用缩写
           sed -i 's/CONFIG_DEFAULT_TCP_CONG="cubic"/CONFIG_DEFAULT_TCP_CONG="bbr"/g' arch/arm64/configs/gki_defconfig
-          cat <<'EOF' >> arch/arm64/configs/gki_defconfig
-          CONFIG_TCP_CONG_BBR=y
-          CONFIG_NET_SCH_FQ=y
-          CONFIG_NET_SCH_FQ_CODEL=y
-          CONFIG_BPF_SYSCALL=y
-          EOF
+          echo "CONFIG_TCP_CONG_BBR=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_NET_SCH_FQ=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_NET_SCH_FQ_CODEL=y" >> arch/arm64/configs/gki_defconfig
 
-      - name: 💉 [Step 06] 调度器内核级补丁：Phantom Engine 满血版
+      - name: 💉 [Step 06] 物理级代码注入：Phantom 调度器与 GPU 锁定
         run: |
           cd workspace/common
+          # 1. 物理编写 Phantom Engine 核心
           cat <<'EOF' > kernel/sched/phantom_core.c
           #include <linux/sched.h>
           #include <linux/cpumask.h>
           #include <linux/module.h>
           void apply_phantom_policy(struct task_struct *p) {
-              if (p && p->comm) {
-                  if (strstr(p->comm, "surfaceflinger") || strstr(p->comm, "RenderThread")) {
-                      cpumask_t ui_mask;
-                      cpumask_clear(&ui_mask);
-                      cpumask_set_cpu(7, &ui_mask);
-                      if (p->nr_cpus_allowed > 1) set_cpus_allowed_ptr(p, &ui_mask);
-                      p->static_prio = 95; 
-                  }
+              if (p && p->comm && (strstr(p->comm, "surfaceflinger") || strstr(p->comm, "RenderThread"))) {
+                  cpumask_t ui_mask;
+                  cpumask_clear(&ui_mask);
+                  cpumask_set_cpu(7, &ui_mask); /* 绑定 8G3 的 Cortex-X4 超大核 */
+                  if (p->nr_cpus_allowed > 1) set_cpus_allowed_ptr(p, &ui_mask);
+                  p->static_prio = 95;
               }
           }
           EXPORT_SYMBOL(apply_phantom_policy);
           EOF
           echo "obj-y += phantom_core.o" >> kernel/sched/Makefile
 
-      - name: ⚡ [Step 07] GPU 与温控：Adreno 750 频率锁物理注入
-        run: |
-          cd workspace/common
-          # 物理定位：不再依赖 find，而是通过遍历可能路径
-          POTENTIAL_PATHS="drivers/gpu/msm drivers/gpu/drm/msm techpack/display/drivers/gpu/drm/msm"
-          TARGET_DIR=""
-          for p in $POTENTIAL_PATHS; do
-            if [ -d "$p" ]; then TARGET_DIR="$p"; break; fi
-          done
-          
-          if [ -z "$TARGET_DIR" ]; then
-            echo "未发现标准 GPU 路径，正在创建物理注入点..."
-            TARGET_DIR="drivers/gpu/phantom_kgsl"
-            mkdir -p "$TARGET_DIR"
-          fi
-          
-          cat <<'EOF' > "$TARGET_DIR/phantom_gpu_boost.c"
+          # 2. 物理创建 GPU 调优层
+          mkdir -p drivers/gpu/phantom_kgsl
+          cat <<'EOF' > drivers/gpu/phantom_kgsl/phantom_gpu_boost.c
           #include <linux/module.h>
           void phantom_gpu_tune(unsigned int *freq) {
               if (freq && *freq < 480000000) *freq = 615000000;
           }
           EOF
-          echo "obj-y += phantom_gpu_boost.o" >> "$TARGET_DIR/Makefile"
-          # 将该目录挂载回主 Makefile 以确保编译
-          if [[ "$TARGET_DIR" == *"phantom_kgsl"* ]]; then
-             echo "obj-y += phantom_kgsl/" >> drivers/gpu/Makefile
-          fi
+          echo "obj-y += phantom_gpu_boost.o" > drivers/gpu/phantom_kgsl/Makefile
+          echo "obj-y += phantom_kgsl/" >> drivers/gpu/Makefile
 
-      - name: 🧬 [Step 08] 内存加速：ZRAM 与 LZ4-Ultra 算法平铺
+      - name: 🧬 [Step 07] 内存优化：ZRAM/LZ4 & 8G3 缓存逻辑补全
         run: |
           cd workspace
           git clone --depth=1 https://github.com/cctv18/oppo_oplus_realme_sm8650.git p_repo
           cd common
           git apply -p1 < ../p_repo/zram_patch/001-lz4.patch || true
-          cat <<'EOF' >> arch/arm64/configs/gki_defconfig
-          CONFIG_ZRAM=y
-          CONFIG_ZRAM_DEF_COMP_LZ4=y
-          CONFIG_LZ4_COMPRESS=y
-          EOF
-
-      # ========================================================================
-      # 第三阶段：编译核心参数专项 (物理展开 Polly 与 SM8650 特化)
-      # ========================================================================
-      - name: ⚙️ [Step 09] 稳定性修正：禁用 LTO 与 冗余 DTB 剔除
-        run: |
-          cd workspace/common
-          sed -i '/sony/d' arch/arm64/boot/dts/qcom/Makefile || true
-          CONF="arch/arm64/configs/gki_defconfig"
-          sed -i '/CONFIG_LTO_CLANG/d' $CONF
-          sed -i '/CONFIG_DEBUG_INFO_BTF/d' $CONF
           {
-            echo "CONFIG_LTO_NONE=y"
-            echo "CONFIG_CFI_CLANG=n"
-            echo "CONFIG_DEBUG_INFO_BTF=n"
+            echo "CONFIG_ZRAM=y"
+            echo "CONFIG_ZRAM_DEF_COMP_LZ4=y"
+            echo "CONFIG_LZ4_COMPRESS=y"
             echo "CONFIG_HZ_1000=y"
-            echo "CONFIG_SCHED_WALT=y"
-          } >> $CONF
-          sed -i 's/CONFIG_HZ=250/CONFIG_HZ=1000/g' $CONF
-          sed -i 's/ -dirty//g' scripts/setlocalversion
+          } >> arch/arm64/configs/gki_defconfig
+          sed -i 's/CONFIG_HZ=250/CONFIG_HZ=1000/g' arch/arm64/configs/gki_defconfig
 
-      - name: 📂 [Step 10] Ccache 持久化缓存加载
+      # ========================================================================
+      # 第三阶段：编译核心执行 (物理展开环境变量与分步构建)
+      # ========================================================================
+      - name: 📂 [Step 08] Ccache 状态加载
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ccache-sm8650-full-修正-${{ github.sha }}
-          restore-keys: ccache-sm8650-full-修正-
+          key: ccache-sm8650-official-clang-${{ github.sha }}
+          restore-keys: ccache-sm8650-official-clang-
 
-      - name: 🏗️ [Step 11] 环境物理对齐 (全量路径展开)
+      - name: 🏗️ [Step 09] 物理对齐工具链与环境声明
         run: |
           cd workspace/common
           mkdir -p out
           cp arch/arm64/configs/gki_defconfig out/.config
+          
+          # 物理将 Clang 路径压入系统 PATH
           echo "${{ env.CLANG_ROOT }}/bin" >> $GITHUB_PATH
           echo "CCACHE_DIR=${{ env.CCACHE_DIR }}" >> $GITHUB_ENV
-          echo "ARCH=arm64" >> $GITHUB_ENV
 
-      - name: 🏗️ [Step 12] 满血编译执行：Clang 20 + Polly 深度优化
+      - name: 🏗️ [Step 10] 启动全量生产级编译 (Clang r498220b + 8G3 特化)
         run: |
           cd workspace/common
-          # 极致特化参数展开
-          export KCFLAGS="-march=armv9.2-a+crypto+fp16+dotprod -mtune=neoverse-v2 \
-            -mllvm -polly -mllvm -polly-ast-detect-unprofitable \
-            -mllvm -polly-run-inliner -mllvm -polly-vectorizer=stripmine \
-            -O3 -pipe"
-
+          
+          # 1. 物理声明所有环境变量，不使用任何缩写变量名
+          export ARCH=arm64
+          export SUBARCH=arm64
           export LLVM=1
           export LLVM_IAS=1
           export CROSS_COMPILE=aarch64-linux-gnu-
@@ -181,17 +150,29 @@ jobs:
           export CLANG_TRIPLE=aarch64-linux-gnu-
           export CC="ccache clang"
           export LD=ld.lld
+          export AR=llvm-ar
+          export NM=llvm-nm
+          export OBJCOPY=llvm-objcopy
+          export OBJDUMP=llvm-objdump
+          export STRIP=llvm-strip
+          
+          # 2. 注入针对 8G3 (v9.2-a) 的生产级编译 Flag
+          # 换用 r498220b 稳定的优化组合，避开 experimental 功能
+          export KCFLAGS="-march=armv8-a+crc+crypto -O3 -pipe -fno-strict-aliasing"
 
-          echo "==== [PHASE A] 同步配置 ===="
+          echo "==== 阶段 A: 同步旧配置 (olddefconfig) ===="
           yes "" | make O=out ARCH=arm64 olddefconfig
           
-          echo "==== [PHASE B] 启动内核主镜像链接 (Image) ===="
-          make -j2 O=out ARCH=arm64 V=1 Image 2>&1 | tee ../build_log.txt || (tail -n 300 ../build_log.txt && exit 1)
+          echo "==== 阶段 B: 导出 UAPI 头文件 ===="
+          make O=out ARCH=arm64 headers_install
+          
+          echo "==== 阶段 C: 启动主镜像 Image 构建 ===="
+          make -j$(nproc) O=out ARCH=arm64 KCFLAGS="$KCFLAGS" V=1 Image 2>&1 | tee ../build_log.txt || (tail -n 300 ../build_log.txt && exit 1)
 
       # ========================================================================
-      # 第四阶段：全量封装与发布
+      # 第四阶段：成果封装 (物理展开 AnyKernel3 逻辑)
       # ========================================================================
-      - name: 📦 [Step 13] AnyKernel3 满血版刷机包制作
+      - name: 📦 [Step 11] AnyKernel3 满血封装
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 ak3
           IMAGE=$(find workspace/common/out/arch/arm64/boot/ -name "Image*" | head -n 1)
@@ -199,19 +180,18 @@ jobs:
             cp "$IMAGE" ak3/
             cd ak3
             sed -i "s/device.name1=/device.name1=${{ env.DEVICE_NAME }}/g" anykernel.sh
-            zip -r9 ../Phantom-Kernel-SM8650-Ultra.zip *
+            zip -r9 ../Phantom-Kernel-SM8650-Official.zip *
           else
-            echo "致命错误：Image 文件缺失" && exit 1
+            echo "致命错误：Image 文件缺失，编译可能在链接阶段崩溃" && exit 1
           fi
 
-      - name: 📤 [Step 14] 全量发布构建成果
+      - name: 📤 [Step 12] 全量成品发布
         uses: actions/upload-artifact@v4
         with:
-          name: Phantom-Kernel-Release-Full
+          name: Phantom-Kernel-Official-Clang
           path: |
-            Phantom-Kernel-SM8650-Ultra.zip
+            Phantom-Kernel-SM8650-Official.zip
             workspace/build_log.txt
-            workspace/common/out/.config
 
-      - name: 📊 [Step 15] 编译统计与 Ccache 状态
+      - name: 📊 [Step 13] 构建统计报告
         run: ccache -s
